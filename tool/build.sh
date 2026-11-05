@@ -16,7 +16,7 @@ XCODEGEN="${XCODEGEN_BIN:-/Users/y/toolchains/bin/xcodegen}"
 NODE="${NODE_BIN:-/Users/y/toolchains/bin/node}"
 
 VERSION="$(sed -nE "s/.*versionName ['\"]([^'\"]+)['\"].*/\1/p" "$SRC/android/app/build.gradle" | head -1)"
-VERSION="${VERSION:-1.2.0}"
+VERSION="${VERSION:-1.2.1}"
 APK_NAME="NounKiller-$VERSION.apk"
 IPA_NAME="NounKiller-$VERSION.ipa"
 
