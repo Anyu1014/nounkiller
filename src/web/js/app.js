@@ -1558,7 +1558,7 @@
     g4.appendChild(h('p', { class: 'about-author', text: '作者：Anyu' }));
     g4.appendChild(h('p', {
       class: 'about-note',
-      text: 'NounKiller v1.2 · 专注名词解释的背诵工具。三级评级快速自测；不熟悉时逐字点亮回忆，再用间隔重复把「看过」变成「说得出」。'
+      text: 'NounKiller v1.3 · 专注名词解释的背诵工具。三级评级快速自测；不熟悉时逐字点亮回忆，再用间隔重复把「看过」变成「说得出」。'
     }));
     g4.appendChild(h('p', {
       class: 'about-note',
