@@ -1205,7 +1205,7 @@
   function openImport(presetDeckId) {
     var parsed = null;
     var body = h('div');
-    var footInfo = h('span', { class: 'foot-left', text: '支持 .txt / .json' });
+    var footInfo = h('span', { class: 'foot-left', text: '支持 txt / json / pdf / docx / 图片' });
 
     var targetField = h('div', { class: 'field' });
     targetField.appendChild(h('label', { for: 'importDeckSelect', text: '导入到' }));
@@ -1239,10 +1239,10 @@
     var drop = h('div', { class: 'drop-zone', tabindex: '0', role: 'button' });
     drop.appendChild(icon(ICONS.upload));
     drop.appendChild(h('span', null, h('b', { text: '选择题库文件' }), ' 或拖到这里'));
-    drop.appendChild(h('span', { text: 'txt / json / jsonl / md' }));
+    drop.appendChild(h('span', { text: 'txt / json / md / pdf / docx / 截图' }));
     var fileInput = h('input', {
       type: 'file',
-      accept: '.txt,.json,.jsonl,.md,text/plain,application/json',
+      accept: '.txt,.json,.jsonl,.md,.pdf,.docx,.doc,image/*,text/plain,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       hidden: true
     });
     body.appendChild(drop);
@@ -1257,7 +1257,7 @@
     body.appendChild(textarea);
     body.appendChild(h('p', {
       class: 'import-help',
-      text: 'txt：名词一行、解释跟几行，条目之间可无空行；名词前有序号（1. / （1） / 一、）时序号即分条标记；也支持逐行「名词：解释」。json：数组、{cards:[...]} 或 {"名词":"解释"}。'
+      text: 'txt：名词一行、解释跟几行，条目之间可无空行；名词前有序号（1. / （1） / 一、）时序号即分条标记；也支持逐行「名词：解释」。PDF 取文字层，Word 支持 .docx，截图会自动识别中文；识别结果仍按上面同一套规则切分。'
     }));
 
     var preview = h('div', { class: 'import-preview', text: '等待内容…' });
@@ -1269,7 +1269,7 @@
         parsed = null;
         preview.className = 'import-preview';
         preview.textContent = '等待内容…';
-        footInfo.textContent = '支持 .txt / .json';
+        footInfo.textContent = '支持 txt / json / pdf / docx / 图片';
         updateImportButton();
         return;
       }
@@ -1305,7 +1305,7 @@
         var deckName = '';
         if (deckId === '__new__') {
           deckName = nameInput.value.trim() || parsed.name || '导入题库';
-          deckName = deckName.replace(/\.(txt|json|jsonl|md)$/i, '');
+          deckName = deckName.replace(/\.[^.]+$/, '');
           deckId = store.createDeck(deckName).id;
         }
         var added = store.addCards(deckId, parsed.cards);
@@ -1342,16 +1342,39 @@
 
     function loadFile(file) {
       if (!file) return;
-      if (file.size > 8 * 1024 * 1024) { toast('文件过大（上限 8MB）'); return; }
-      var reader = new FileReader();
-      reader.onload = function () {
-        textarea.value = String(reader.result || '');
-        if (!nameInput.value) nameInput.value = file.name.replace(/\.(txt|json|jsonl|md)$/i, '');
+      var kind = MJZ.extract.kindOf(file);
+      var limits = { text: 8, pdf: 30, docx: 20, doc: 8, image: 12 };
+      if (file.size > (limits[kind] || 8) * 1024 * 1024) {
+        toast('文件过大（该类型上限 ' + (limits[kind] || 8) + 'MB）');
+        return;
+      }
+      var labels = { pdf: '正在读取 PDF…', docx: '正在读取 Word…', image: '正在识别图片文字…', text: '正在读取文件…' };
+      preview.className = 'import-preview';
+      preview.textContent = labels[kind] || '正在读取…';
+      footInfo.textContent = '识别中，请稍候';
+      importBtn.disabled = true;
+      MJZ.extract.extract(file, function (a, b) {
+        if (kind === 'image') {
+          var pct = Math.round((Number(a) || 0) * 100);
+          if (b === 'recognizing text') preview.textContent = '正在识别图片文字… ' + pct + '%';
+          else if (b === 'loading language traineddata') preview.textContent = '正在下载中文识别包…';
+          else if (b === 'initializing api' || b === 'loading tesseract core') preview.textContent = '正在初始化识别引擎…';
+          else if (pct) preview.textContent = '正在识别图片文字… ' + pct + '%';
+        } else if (kind === 'pdf') {
+          preview.textContent = '正在读取 PDF… ' + a + ' / ' + b + ' 页';
+        }
+      }).then(function (text) {
+        textarea.value = text;
+        if (!nameInput.value) nameInput.value = file.name.replace(/\.[^.]+$/, '');
         if (select.value !== '__new__' && !store.deckById(select.value)) select.value = '__new__';
         parseNow();
-      };
-      reader.onerror = function () { toast('读取文件失败'); };
-      reader.readAsText(file, 'utf-8');
+      }).catch(function (err) {
+        parsed = null;
+        preview.className = 'import-preview err';
+        preview.textContent = err && err.message ? err.message : '识别失败，请换一个文件试试';
+        footInfo.textContent = '识别失败';
+        importBtn.disabled = true;
+      });
     }
 
     drop.addEventListener('click', function () { fileInput.click(); });
