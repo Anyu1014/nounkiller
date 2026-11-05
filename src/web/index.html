@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f0e8">
+  <meta name="description" content="NounKiller —— 用三级记忆评级和逐字回忆，把名词解释真正背下来。">
+  <title>NounKiller · 名词解释记忆</title>
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="appbar">
+      <button class="brand" id="brandHome" type="button" aria-label="回到当前题库">
+        <span class="seal" aria-hidden="true">n.</span>
+        <span class="brand-name">NounKiller</span>
+      </button>
+      <div class="appbar-right">
+        <button class="deck-chip" id="deckBtn" type="button" aria-haspopup="dialog">
+          <span class="deck-chip-label" id="deckName">示例题库</span>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="icon-btn" id="settingsBtn" type="button" aria-label="设置" aria-haspopup="dialog">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 12.6a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2Z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M16.1 11.2a6.6 6.6 0 0 0 0-2.4l1.5-1.2-1.6-2.8-1.9.7a6.5 6.5 0 0 0-2-1.2L11.9 2H8.1l-.2 2.3a6.5 6.5 0 0 0-2 1.2l-1.9-.7L2.4 7.6l1.5 1.2a6.6 6.6 0 0 0 0 2.4l-1.5 1.2 1.6 2.8 1.9-.7a6.5 6.5 0 0 0 2 1.2l.2 2.3h3.8l.2-2.3a6.5 6.5 0 0 0 2-1.2l1.9.7 1.6-2.8-1.5-1.2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="main" id="main">
+      <section class="screen study" id="studyScreen" aria-live="polite">
+        <div class="study-top">
+          <div class="study-meta">
+            <div class="crumbs" id="crumbs"></div>
+            <div class="progress" role="progressbar" aria-label="本轮进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress">
+              <i id="progressFill"></i>
+            </div>
+          </div>
+          <div class="study-nav">
+            <button class="nav-btn" id="tocBtn" type="button" aria-haspopup="dialog" title="打开目录">目录</button>
+            <button class="nav-btn" id="prevBtn" type="button" title="上一条">上一条</button>
+          </div>
+        </div>
+
+        <article class="card" id="card">
+          <div class="card-eyebrow">
+            <span id="cardCounter">第 1 张</span>
+            <span class="eyebrow-dot" aria-hidden="true"></span>
+            <span id="cardStatus">待回忆</span>
+          </div>
+          <div class="term-row">
+            <h1 class="term" id="term"></h1>
+            <button class="fav-btn" id="favBtn" type="button" aria-label="收藏这个词条" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.4l2.6 5.3 5.8.9-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.9z"/></svg>
+            </button>
+          </div>
+          <div class="answer" id="answer"></div>
+          <div class="answer-tools" id="answerTools" hidden></div>
+        </article>
+
+        <div class="rating" id="ratingBar">
+          <button class="rate-btn unknown" type="button" data-rating="unknown">
+            <span class="rate-key" aria-hidden="true">1</span>
+            <span class="rate-main">不认识</span>
+            <span class="rate-sub">完全没有印象</span>
+          </button>
+          <button class="rate-btn fuzzy" type="button" data-rating="fuzzy">
+            <span class="rate-key" aria-hidden="true">2</span>
+            <span class="rate-main">不熟悉</span>
+            <span class="rate-sub">逐字点亮回忆</span>
+          </button>
+          <button class="rate-btn known" type="button" data-rating="known">
+            <span class="rate-key" aria-hidden="true">3</span>
+            <span class="rate-main">熟悉</span>
+            <span class="rate-sub">能完整讲出来</span>
+          </button>
+        </div>
+
+        <div class="next-row" id="nextRow" hidden></div>
+
+        <div class="session-foot" id="sessionFoot">
+          <span>先在心里把释义过一遍，再选择记忆程度</span>
+          <span class="kbd-hint">快捷键 <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> 评级 · <kbd>空格</kbd> 下一条</span>
+        </div>
+      </section>
+
+      <section class="screen done" id="doneScreen" hidden></section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <div class="modal" id="modal" hidden>
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <header class="modal-head">
+          <div>
+            <p class="modal-kicker" id="modalKicker">NounKiller</p>
+            <h2 id="modalTitle">题库</h2>
+          </div>
+          <button class="icon-btn" type="button" data-close="1" aria-label="关闭">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          </button>
+        </header>
+        <div class="modal-body" id="modalBody"></div>
+        <footer class="modal-foot" id="modalFoot"></footer>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="js/core.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

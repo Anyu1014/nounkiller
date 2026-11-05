@@ -1,0 +1,72 @@
+name: NounKiller
+options:
+  bundleIdPrefix: com.nounkiller
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: UQ6YYY43ZY
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+targets:
+  NounKiller:
+    type: application
+    platform: iOS
+    sources:
+      - path: NounKiller
+        excludes:
+          - "www"
+          - "Info.plist"
+      - path: NounKiller/www
+        type: folder
+        buildPhase: resources
+    info:
+      path: NounKiller/Info.plist
+      properties:
+        CFBundleDisplayName: NounKiller
+        CFBundleName: NounKiller
+        CFBundleShortVersionString: "1.2.0"
+        CFBundleVersion: "3"
+        CFBundleDevelopmentRegion: zh_CN
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: false
+        ITSAppUsesNonExemptEncryption: false
+        UIStatusBarStyle: UIStatusBarStyleDarkContent
+        UIViewControllerBasedStatusBarAppearance: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nounkiller.app
+        PRODUCT_NAME: NounKiller
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        SUPPORTS_MACCATALYST: NO
+        INFOPLIST_KEY_CFBundleDisplayName: NounKiller
+schemes:
+  NounKiller:
+    build:
+      targets:
+        NounKiller: all
+    run:
+      config: Debug
+    archive:
+      config: Release

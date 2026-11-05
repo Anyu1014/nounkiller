@@ -1,0 +1,24 @@
+# 构建产物与缓存
+/build/
+/.cache/
+*.log
+
+# Android
+src/android/.gradle/
+src/android/build/
+src/android/app/build/
+src/android/local.properties
+src/android/app/src/main/assets/www/
+
+# iOS（工程与 www 由 src/tool/build.sh 生成）
+src/ios/NounKiller.xcodeproj/
+src/ios/NounKiller/www/
+src/ios/NounKiller/Info.plist
+src/ios/*.xcworkspace/
+*.xcuserdatad/
+
+.DS_Store
+
+# 签名文件不入库
+src/android/app/*.keystore
+src/android/app/*.jks
