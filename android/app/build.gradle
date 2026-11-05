@@ -1,0 +1,43 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'com.nounkiller.app'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.nounkiller.app"
+        minSdk 23
+        targetSdk 36
+        versionCode 3
+        versionName "1.2.0"
+        resConfigs "zh", "en"
+    }
+
+    signingConfigs {
+        release {
+            storeFile file("nounkiller.keystore")
+            storePassword "nounkiller"
+            keyAlias "nounkiller"
+            keyPassword "nounkiller"
+            enableV1Signing true
+            enableV2Signing true
+            enableV3Signing true
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            applicationIdSuffix ".debug"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
