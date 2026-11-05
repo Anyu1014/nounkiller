@@ -228,6 +228,20 @@
       return { cards: dedupe(pairs), skipped: skipped };
     }
 
+    // 空行前若是一整句没有冒号的孤立句子，视为上一段的续行（截图 OCR 常插空行）
+    var merged = [];
+    for (var mi = 0; mi < lines.length; mi++) {
+      if (!lines[mi].trim()) {
+        var mj = mi + 1;
+        while (mj < lines.length && !lines[mj].trim()) mj++;
+        var nx = mj < lines.length ? stripHash(lines[mj]).trim() : '';
+        var orphan = nx && !/[：:]/.test(nx) && nx.length > 12 && /[。！？]$/.test(nx);
+        if (orphan && merged.length) continue;
+      }
+      merged.push(lines[mi]);
+    }
+    lines = merged;
+
     // 2) 逐行扫描
     var cur = null;
     var defLines = [];

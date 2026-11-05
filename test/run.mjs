@@ -106,6 +106,16 @@ test('parseText：空行分条、首行名词、多行解释合并', () => {
   assert.equal(cards[1].term, '沉没成本');
 });
 
+test('parseText：截图 OCR 的孤立整句并回上一段', () => {
+  const raw = '1. 编码:把信息转化为符号的过程。\n\n'
+    + '编码者需要在共享的意义空间中选择符号系统。\n'
+    + '2. 解码:接收者把符号还原为意义的过程。';
+  const { cards } = C.parseText(raw);
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0].term, '编码');
+  assert.match(cards[0].def, /符号的过程。\n编码者需要在共享/);
+});
+
 test('parseText：单块「名词：解释」逐行写法', () => {
   const raw = '机会成本：放弃的最大价值。\n沉没成本：已经发生、无法收回的支出。\n边际效用：每增加一单位带来的效用增量。';
   const { cards } = C.parseText(raw);
