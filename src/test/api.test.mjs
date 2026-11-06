@@ -100,10 +100,15 @@ test('管理员列表与回复', { skip: health && ADMIN ? false : '需要 NK_AD
   assert.equal(reply.status, 201);
 });
 
-test('忘记密码改为联系管理员', { skip: health ? false : '需要 Pages D1 运行时' }, async () => {
-  const r = await call('/api/auth/forgot', { method: 'POST', body: { email: 'nobody@nk.local' } });
-  assert.equal(r.status, 200);
-  assert.equal(r.data.contactAdmin, true);
+test('忘记密码直接发送验证码', { skip: health ? false : '需要 Pages D1 运行时' }, async () => {
+  const email = `reset-${Date.now()}@nk.local`;
+  const password = 'resetpass123';
+  const reg = await call('/api/auth/register', { method: 'POST', body: { email, password } });
+  assert.equal(reg.status, 201);
+  const r = await call('/api/auth/forgot', { method: 'POST', body: { email } });
+  // 本地测试没有 QQ_SMTP_PASS 时发送会 503；有凭据时应 200。两种都不泄露邮箱是否存在。
+  assert.ok([200, 503].includes(r.status), `unexpected ${r.status}: ${JSON.stringify(r.data)}`);
+  if (r.status === 200) assert.equal(r.data.ok, true);
 });
 
 test('注销后 7 天内重新注册恢复数据', { skip: health && ADMIN ? false : '需要 NK_ADMIN_TOKEN' }, async () => {

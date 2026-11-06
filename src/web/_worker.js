@@ -24,6 +24,7 @@ const ONLINE_WINDOW_MS = 90 * 1000;
 // 管理员注销账号后，云端数据保留 7 天；期间同邮箱可重新注册恢复。
 const RESTORE_DAYS = 7;
 const RESTORE_MS = RESTORE_DAYS * 24 * 60 * 60 * 1000;
+const RESET_TTL_MS = 10 * 60 * 1000;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -131,6 +132,10 @@ async function ensureSchema(env) {
       'CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)',
       `CREATE TABLE IF NOT EXISTS user_data (
         user_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS reset_requests (
+        email TEXT PRIMARY KEY, requested_at INTEGER NOT NULL,
+        sent_at INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL DEFAULT 0,
+        code_hash TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0)`,
       `CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
         sender TEXT NOT NULL CHECK (sender IN ('user','admin')),
@@ -370,6 +375,31 @@ function welcomeMail(email, restored = false) {
   return { to: email, subject: `NounKiller ${title}`, text, html };
 }
 
+function resetMail(env, email, code) {
+  const from = mailFrom(env);
+  const text = [
+    'NounKiller / 名解斩',
+    '',
+    `你的密码重置验证码是：${code}`,
+    '验证码 10 分钟内有效，只能使用一次。',
+    '如非本人申请，请忽略本邮件，你的密码不会被修改。',
+  ].join('\n');
+  const html = `<!doctype html><html><body style="margin:0;background:#f3f0e8;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;color:#20241f">
+  <div style="max-width:520px;margin:0 auto;padding:36px 22px">
+    <div style="background:#244f3f;color:#f7f3e8;border-radius:18px;padding:26px 28px">
+      <div style="font:600 13px/1.4 ui-monospace,monospace;letter-spacing:.18em;opacity:.75">NOUNKILLER</div>
+      <div style="font-family:Georgia,'Songti SC',serif;font-size:30px;margin-top:12px">重置密码</div>
+    </div>
+    <div style="background:#fbfaf5;border:1px solid #e5dfd0;border-radius:18px;padding:26px 28px;margin-top:14px;font-size:15px;line-height:1.85">
+      <p style="margin:0 0 12px">你的密码重置验证码：</p>
+      <p style="margin:0 0 16px;font:600 30px/1.2 ui-monospace,monospace;letter-spacing:.16em">${code}</p>
+      <p style="margin:0 0 12px">验证码 10 分钟内有效，只能使用一次。</p>
+      <p style="margin:0;color:#8b8d80;font-size:12.5px">如非本人申请，请忽略本邮件，你的密码不会被修改。</p>
+    </div>
+  </div></body></html>`;
+  return { from, to: email, subject: 'NounKiller 重置密码验证码', text, html };
+}
+
 async function handleRegister(request, env, ctx) {
   const body = await readJson(request);
   const email = normalizeEmail(body.email);
@@ -431,12 +461,69 @@ async function handleLogin(request, env) {
   return json({ token, user: userView(row) });
 }
 
-async function handleForgot() {
-  return json({
-    ok: true,
-    contactAdmin: true,
-    message: '找回密码请联系管理员：管理员注销账号后，7 天内用同一邮箱重新注册即可设置新密码并恢复数据。',
-  });
+async function handleForgot(request, env) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  need(email.includes('@'), 400, '请输入有效邮箱');
+  const user = await env.DB.prepare(
+    'SELECT id FROM users WHERE email = ? AND deleted_at = 0',
+  ).bind(email).first();
+  const now = Date.now();
+  if (user) {
+    const last = await env.DB.prepare(
+      'SELECT sent_at FROM reset_requests WHERE email = ?',
+    ).bind(email).first();
+    // 同一邮箱 60 秒内只发一次，避免被当成邮件轰炸工具。
+    if (!last || last.sent_at < now - 60000) {
+      const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
+      const codeHash = await sha256(`${email}:reset:${code}`);
+      await env.DB.prepare(
+        `INSERT INTO reset_requests (email, requested_at, sent_at, expires_at, code_hash, attempts)
+         VALUES (?, ?, ?, ?, ?, 0)
+         ON CONFLICT(email) DO UPDATE SET requested_at = excluded.requested_at,
+           sent_at = excluded.sent_at, expires_at = excluded.expires_at,
+           code_hash = excluded.code_hash, attempts = 0`,
+      ).bind(email, now, now, now + RESET_TTL_MS, codeHash).run();
+      try {
+        await sendMail(env, resetMail(env, email, code));
+      } catch (err) {
+        console.error('reset mail failed', err);
+        return fail(503, '验证码邮件发送失败，请稍后重试');
+      }
+    }
+  }
+  return json({ ok: true, message: '如果该邮箱已注册，验证码已发送，10 分钟内有效。' });
+}
+
+async function handleReset(request, env) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  const code = String(body.code || '').trim();
+  const password = normalizePassword(body.password);
+  need(/^\d{6}$/.test(code), 400, '请输入 6 位验证码');
+  const row = await env.DB.prepare('SELECT * FROM reset_requests WHERE email = ?').bind(email).first();
+  need(row && row.sent_at > 0, 400, '验证码尚未发送，请联系管理员');
+  need(row.expires_at > Date.now(), 400, '验证码已过期，请联系管理员重新发送');
+  need(row.attempts < 5, 429, '尝试次数过多，请联系管理员重新发送');
+  const hash = await sha256(`${email}:reset:${code}`);
+  if (hash !== row.code_hash) {
+    await env.DB.prepare('UPDATE reset_requests SET attempts = attempts + 1 WHERE email = ?').bind(email).run();
+    return fail(400, '验证码不正确');
+  }
+  const user = await env.DB.prepare(
+    'SELECT id FROM users WHERE email = ? AND deleted_at = 0',
+  ).bind(email).first();
+  need(user, 404, '用户不存在或已注销');
+  const salt = bytesToB64(crypto.getRandomValues(new Uint8Array(16)));
+  const passHash = await hashPassword(password, salt);
+  await env.DB.batch([
+    env.DB.prepare('UPDATE users SET pass_hash = ?, salt = ? WHERE id = ?').bind(passHash, salt, user.id),
+    env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id),
+    env.DB.prepare('DELETE FROM reset_requests WHERE email = ?').bind(email),
+  ]);
+  const token = await createSession(env, user.id);
+  const full = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first();
+  return json({ token, user: userView(full) });
 }
 
 async function handleMe(request, env) {
@@ -641,6 +728,7 @@ async function route(request, env, ctx) {
   if (path === '/api/health') return json({ ok: true, cloud: true, mail: !!(env.QQ_SMTP_USER && env.QQ_SMTP_PASS) });
   if (path === '/api/auth/register' && request.method === 'POST') return handleRegister(request, env, ctx);
   if (path === '/api/auth/forgot' && request.method === 'POST') return handleForgot(request, env);
+  if (path === '/api/auth/reset' && request.method === 'POST') return handleReset(request, env);
   if (path === '/api/auth/login' && request.method === 'POST') return handleLogin(request, env);
   if (path === '/api/auth/logout' && request.method === 'POST') {
     const user = await requireUser(request, env);

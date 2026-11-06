@@ -902,6 +902,7 @@ kbd {
 }
 
 .modal-foot .foot-left { margin-right: auto; color: var(--muted); font-size: 12px; }
+.modal-foot-row { display: flex; align-items: center; gap: 10px; width: 100%; }
 
 .modal-foot .primary-btn, .modal-foot .ghost-btn { min-height: 44px; padding: 0 18px; font-size: 13.5px; }
 
