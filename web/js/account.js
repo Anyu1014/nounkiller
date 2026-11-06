@@ -151,8 +151,8 @@
     var hint = h('p', { class: 'field-hint', text: '密码至少 8 位。注册不需要邮箱验证码。' });
     fieldPass.appendChild(hint);
     fieldPass.appendChild(h('button', {
-      class: 'auth-link', type: 'button', text: '忘记密码？用注册邮箱重置',
-      onclick: function () { openReset(email.value.trim()); }
+      class: 'auth-link', type: 'button', text: '忘记密码？联系管理员',
+      onclick: openContactAdmin
     }));
     body.appendChild(fieldPass);
 
@@ -213,137 +213,25 @@
     setTimeout(function () { email.focus(); }, 60);
   }
 
-  function openReset(prefill) {
+  function openContactAdmin() {
     var body = h('div', { class: 'account-form' });
-    body.appendChild(h('p', { class: 'account-intro', text: '输入注册邮箱，我们会发一封 6 位验证码邮件。验证码 10 分钟内有效，重置后所有设备需重新登录。' }));
-
-    var fieldEmail = h('div', { class: 'field' });
-    fieldEmail.appendChild(h('label', { for: 'nkResetEmail', text: '注册邮箱' }));
-    var email = h('input', { id: 'nkResetEmail', type: 'email', autocomplete: 'email', inputmode: 'email', placeholder: 'you@example.com' });
-    if (prefill) email.value = prefill;
-    fieldEmail.appendChild(email);
-    var send = h('button', { class: 'ghost-btn auth-send', type: 'button', text: '发送验证码' });
-    fieldEmail.appendChild(send);
-    body.appendChild(fieldEmail);
-
-    var fieldCode = h('div', { class: 'field' });
-    fieldCode.appendChild(h('label', { for: 'nkResetCode', text: '邮箱验证码' }));
-    var code = h('input', { id: 'nkResetCode', type: 'text', autocomplete: 'one-time-code', inputmode: 'numeric', maxlength: '6', placeholder: '6 位数字' });
-    fieldCode.appendChild(code);
-    var status = h('p', { class: 'field-hint', id: 'nkResetStatus', text: '验证码只用于重置密码，不会用于登录。' });
-    fieldCode.appendChild(status);
-    body.appendChild(fieldCode);
-
-    var fieldPass = h('div', { class: 'field' });
-    fieldPass.appendChild(h('label', { for: 'nkResetPassword', text: '新密码' }));
-    var pass = h('input', { id: 'nkResetPassword', type: 'password', autocomplete: 'new-password', placeholder: '至少 8 位' });
-    fieldPass.appendChild(pass);
-    body.appendChild(fieldPass);
-
-    var fieldConfirm = h('div', { class: 'field' });
-    fieldConfirm.appendChild(h('label', { for: 'nkResetConfirm', text: '再输一次' }));
-    var confirm = h('input', { id: 'nkResetConfirm', type: 'password', autocomplete: 'new-password', placeholder: '再次输入新密码' });
-    fieldConfirm.appendChild(confirm);
-    body.appendChild(fieldConfirm);
-
-    var errorLine = h('p', { class: 'account-error', hidden: true });
-    body.appendChild(errorLine);
-
-    var submit = h('button', { class: 'primary-btn account-submit', type: 'button', text: '重置并登录' });
-    var form = h('form', { class: 'account-auth-form' });
-    form.appendChild(body);
+    body.appendChild(h('p', { class: 'account-intro', text: '忘记密码无法自助重置，请联系管理员协助处理。' }));
+    body.appendChild(h('p', { class: 'confirm-text', text: '联系邮箱：2164206282@qq.com' }));
+    body.appendChild(h('p', { class: 'field-hint', text: '管理员注销账号后，云端数据会保留 7 天。7 天内用同一邮箱重新注册，设置新密码即可恢复全部题库、进度、划线和收藏。' }));
     var foot = document.createDocumentFragment();
     foot.appendChild(h('span', { class: 'foot-left' }));
-    foot.appendChild(h('button', { class: 'ghost-btn', type: 'button', text: '取消', onclick: A.closeModal }));
-    foot.appendChild(submit);
-
-    var cooldown = 0;
-    var timer = null;
-
-    function tick() {
-      if (timer) clearInterval(timer);
-      send.disabled = true;
-      (function run() {
-        if (cooldown <= 0) {
-          send.disabled = false;
-          send.textContent = '重新发送';
-          return;
-        }
-        send.textContent = '重发 ' + cooldown + 's';
-        cooldown -= 1;
-        timer = setTimeout(run, 1000);
-      })();
-    }
-
-    function sendCode() {
-      var addr = email.value.trim();
-      if (!addr) {
-        errorLine.textContent = '请先填写注册邮箱';
-        errorLine.hidden = false;
-        email.focus();
-        return;
+    var copy = h('button', { class: 'ghost-btn', type: 'button', text: '复制邮箱' });
+    copy.addEventListener('click', function () {
+      var text = '2164206282@qq.com';
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { A.toast('邮箱已复制'); });
+      } else {
+        A.toast(text);
       }
-      send.disabled = true;
-      send.textContent = '发送中…';
-      errorLine.hidden = true;
-      api('/api/auth/forgot', { method: 'POST', body: { email: addr } }).then(function (data) {
-        cooldown = Number(data && data.cooldown) || 60;
-        status.textContent = '验证码已发送，请查收邮件（含垃圾箱），10 分钟内有效。';
-        errorLine.hidden = true;
-        tick();
-        code.focus();
-      }).catch(function (err) {
-        errorLine.textContent = errText(err);
-        errorLine.hidden = false;
-        send.disabled = false;
-        send.textContent = '发送验证码';
-      });
-    }
-
-    form.addEventListener('submit', function (e) {
-      e.preventDefault();
-      var addr = email.value.trim();
-      var digits = code.value.trim();
-      var pwd = pass.value;
-      if (!addr || !/^\d{6}$/.test(digits)) {
-        errorLine.textContent = '请填写邮箱和 6 位验证码';
-        errorLine.hidden = false;
-        return;
-      }
-      if (pwd.length < 8) {
-        errorLine.textContent = '密码至少 8 位';
-        errorLine.hidden = false;
-        pass.focus();
-        return;
-      }
-      if (pwd !== confirm.value) {
-        errorLine.textContent = '两次输入的密码不一致';
-        errorLine.hidden = false;
-        confirm.focus();
-        return;
-      }
-      submit.disabled = true;
-      submit.textContent = '重置中…';
-      errorLine.hidden = true;
-      api('/api/auth/reset', { method: 'POST', body: { email: addr, code: digits, password: pwd } }).then(function (data) {
-        saveSession({ token: data.token, user: data.user, email: addr });
-        me = data.user;
-        A.closeModal();
-        updateAccountBtn();
-        A.toast('密码已重置，已登录');
-        startCloud();
-      }).catch(function (err) {
-        errorLine.textContent = errText(err);
-        errorLine.hidden = false;
-        submit.disabled = false;
-        submit.textContent = '重置并登录';
-      });
     });
-
-    send.addEventListener('click', sendCode);
-    submit.addEventListener('click', function () { form.requestSubmit(); });
-    A.openModal({ kicker: 'ACCOUNT', title: '重置密码', body: form, foot: foot, autofocus: false });
-    setTimeout(function () { email.focus(); }, 60);
+    foot.appendChild(copy);
+    foot.appendChild(h('button', { class: 'primary-btn', type: 'button', text: '知道了', onclick: function () { A.closeModal(); } }));
+    A.openModal({ kicker: 'ACCOUNT', title: '找回密码', body: body, foot: foot, autofocus: false });
   }
 
   function logout() {
@@ -800,20 +688,30 @@
           nameRow.appendChild(h('i', { class: 'presence-dot' + (u.online ? ' on' : ''), 'aria-hidden': 'true' }));
           nameRow.appendChild(h('strong', { text: u.email }));
           if (u.isAdmin) nameRow.appendChild(h('span', { class: 'admin-tag', text: '管理员' }));
+          if (u.deletedAt) nameRow.appendChild(h('span', { class: 'admin-tag', text: '已注销' }));
           if (u.unread) nameRow.appendChild(h('span', { class: 'admin-tag unread', text: u.unread + ' 条未读' }));
           main.appendChild(nameRow);
+          var daysLeft = u.purgeAt ? Math.max(0, Math.ceil((u.purgeAt - Date.now()) / 86400000)) : 0;
           main.appendChild(h('div', {
             class: 'admin-user-meta',
-            text: (u.online ? '在线' : '最后在线 ' + fmtTime(u.lastSeenAt)) +
+            text: (u.deletedAt ? '已注销 · ' + daysLeft + ' 天后清除' : (u.online ? '在线' : '最后在线 ' + fmtTime(u.lastSeenAt))) +
               ' · 注册 ' + fmtDate(u.createdAt) +
               ' · ' + u.decks + ' 库 / ' + u.cards + ' 条' +
               (u.favorites ? ' · ' + u.favorites + ' 收藏' : '')
           }));
           row.appendChild(main);
-          row.appendChild(h('button', {
+          var actions = h('div', { class: 'admin-user-actions' });
+          actions.appendChild(h('button', {
             class: 'ghost-btn admin-open', type: 'button', text: '留言',
             onclick: function () { openAdminThread(u, timer); }
           }));
+          if (!u.isAdmin && !u.deletedAt) {
+            actions.appendChild(h('button', {
+              class: 'ghost-btn danger-btn admin-delete', type: 'button', text: '注销',
+              onclick: function () { openAdminDelete(u, load); }
+            }));
+          }
+          row.appendChild(actions);
           list.appendChild(row);
         });
       }).catch(function (err) {
@@ -833,6 +731,53 @@
     } }));
 
     A.openModal({ kicker: 'ADMIN', title: '管理后台', body: body, foot: foot, autofocus: false });
+  }
+
+  function openAdminDelete(user, reload) {
+    var body = h('div', { class: 'account-form' });
+    body.appendChild(h('p', { class: 'account-intro', text: '注销后该账号的所有设备会立即退出登录，云端数据保留 7 天。' }));
+    body.appendChild(h('p', { class: 'confirm-text', text: '7 天内用户可用同一邮箱重新注册，设置新密码并恢复全部题库、进度、划线和收藏；7 天后数据自动清除。' }));
+    var field = h('div', { class: 'field' });
+    field.appendChild(h('label', { for: 'nkDeleteEmail', text: '输入 ' + user.email + ' 确认' }));
+    var input = h('input', { id: 'nkDeleteEmail', type: 'text', autocomplete: 'off', placeholder: user.email });
+    field.appendChild(input);
+    body.appendChild(field);
+    var errorLine = h('p', { class: 'account-error', hidden: true });
+    body.appendChild(errorLine);
+
+    var form = h('form', { class: 'account-auth-form' });
+    form.appendChild(body);
+    var submit = h('button', { class: 'danger-btn', type: 'button', text: '注销账号' });
+    var foot = document.createDocumentFragment();
+    foot.appendChild(h('span', { class: 'foot-left' }));
+    foot.appendChild(h('button', { class: 'ghost-btn', type: 'button', text: '取消', onclick: A.closeModal }));
+    foot.appendChild(submit);
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var typed = input.value.trim().toLowerCase();
+      if (typed !== user.email.toLowerCase()) {
+        errorLine.textContent = '邮箱不一致，请完整输入';
+        errorLine.hidden = false;
+        input.focus();
+        return;
+      }
+      submit.disabled = true;
+      submit.textContent = '注销中…';
+      api('/api/admin/users/delete', { method: 'POST', body: { userId: user.id, email: typed } }).then(function () {
+        A.closeModal();
+        A.toast('已注销，数据保留 7 天');
+        if (reload) reload();
+      }).catch(function (err) {
+        errorLine.textContent = errText(err);
+        errorLine.hidden = false;
+        submit.disabled = false;
+        submit.textContent = '注销账号';
+      });
+    });
+    submit.addEventListener('click', function () { form.requestSubmit(); });
+    A.openModal({ kicker: 'ADMIN', title: '注销账号', body: form, foot: foot, autofocus: false });
+    setTimeout(function () { input.focus(); }, 60);
   }
 
   function openAdminThread(user, adminTimer) {

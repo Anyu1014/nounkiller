@@ -99,3 +99,42 @@ test('管理员列表与回复', { skip: health && ADMIN ? false : '需要 NK_AD
   });
   assert.equal(reply.status, 201);
 });
+
+test('忘记密码改为联系管理员', { skip: health ? false : '需要 Pages D1 运行时' }, async () => {
+  const r = await call('/api/auth/forgot', { method: 'POST', body: { email: 'nobody@nk.local' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.contactAdmin, true);
+});
+
+test('注销后 7 天内重新注册恢复数据', { skip: health && ADMIN ? false : '需要 NK_ADMIN_TOKEN' }, async () => {
+  const email = `restore-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@nk.local`;
+  const password = 'restorepass123';
+  const reg = await call('/api/auth/register', { method: 'POST', body: { email, password } });
+  assert.equal(reg.status, 201);
+  const token = reg.data.token;
+  const payload = { version: 3, decks: [{ id: 'd1', name: '恢复测试' }], cards: [{ id: 'c1', deckId: 'd1', term: '甲', def: '乙。' }] };
+  const put = await call('/api/me/data', { method: 'PUT', token, body: { baseVersion: 0, payload } });
+  assert.equal(put.status, 200);
+
+  const del = await call('/api/admin/users/delete', {
+    method: 'POST', token: ADMIN, body: { userId: reg.data.user.id, email },
+  });
+  assert.equal(del.status, 200);
+  assert.ok(del.data.purgeAt > del.data.deletedAt);
+
+  const blocked = await call('/api/auth/login', { method: 'POST', body: { email, password } });
+  assert.equal(blocked.status, 403);
+
+  const again = await call('/api/auth/register', { method: 'POST', body: { email, password: 'newpass12345' } });
+  assert.equal(again.status, 201);
+  assert.equal(again.data.user.restored, true);
+  assert.equal(again.data.user.id, reg.data.user.id);
+
+  const restored = await call('/api/me/data', { token: again.data.token });
+  assert.equal(restored.status, 200);
+  assert.equal(restored.data.payload.cards[0].term, '甲');
+
+  await call('/api/admin/users/delete', {
+    method: 'POST', token: ADMIN, body: { userId: reg.data.user.id, email },
+  });
+});
