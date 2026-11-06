@@ -6,7 +6,8 @@
  *
  * 设计边界：
  * - 登录用邮箱 + 密码（PBKDF2-SHA256），会话令牌只存哈希；不依赖第三方账号系统。
- * - 不做邮箱验证码；密码至少 8 位。忘记密码当前需管理员在 D1 改密，README 有说明。
+ * - 注册会发一封「注册成功」通知邮件（不验证）；忘记密码走邮箱 6 位验证码重置。
+ * - 邮件通过 Brevo HTTP API 发送，密钥只放 Cloudflare Secret（BREVO_API_KEY）。
  * - 每个用户一条 JSON 快照（题库、SRS、划线、设置、收藏都在里面），last-write-wins。
  */
 
@@ -17,6 +18,9 @@ const PBKDF2_ITERATIONS = 100000;
 const MAX_PAYLOAD_BYTES = 900000;
 const MAX_MESSAGE = 2000;
 const ONLINE_WINDOW_MS = 90 * 1000;
+const RESET_TTL_MS = 10 * 60 * 1000;
+const RESET_COOLDOWN_MS = 60 * 1000;
+const RESET_MAX_ATTEMPTS = 5;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -129,6 +133,10 @@ async function ensureSchema(env) {
         body TEXT NOT NULL, created_at INTEGER NOT NULL,
         read_by_user INTEGER NOT NULL DEFAULT 0, read_by_admin INTEGER NOT NULL DEFAULT 0)`,
       'CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, created_at)',
+      `CREATE TABLE IF NOT EXISTS email_codes (
+        email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL,
+        expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, PRIMARY KEY (email, purpose))`,
     ];
     for (const sql of statements) await env.DB.prepare(sql).run();
   })();
@@ -191,7 +199,86 @@ async function unreadFor(env, userId) {
   return row ? row.n : 0;
 }
 
-async function handleRegister(request, env) {
+const MAIL_FROM_FALLBACK = '2164206282@qq.com';
+
+function mailFrom(env) {
+  return String(env.MAIL_FROM || MAIL_FROM_FALLBACK).trim();
+}
+
+// Brevo 事务邮件；没有配置密钥时静默跳过（注册通知不能阻断注册）。
+async function sendMail(env, { to, subject, text, html }) {
+  if (!env.BREVO_API_KEY) return { sent: false, reason: 'mail_not_configured' };
+  const endpoint = env.MAIL_API_URL || 'https://api.brevo.com/v3/smtp/email';
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'api-key': env.BREVO_API_KEY,
+      'content-type': 'application/json',
+      accept: 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { name: String(env.MAIL_FROM_NAME || 'NounKiller').trim(), email: mailFrom(env) },
+      to: [{ email: to }],
+      subject,
+      textContent: text,
+      htmlContent: html,
+    }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`mail ${res.status}: ${detail.slice(0, 240)}`);
+  }
+  return { sent: true };
+}
+
+function welcomeMail(email) {
+  const link = 'https://nounkiller.pages.dev';
+  const text = [
+    'NounKiller / 名解斩',
+    '',
+    `你的邮箱 ${email} 已注册成功。`,
+    '题库、SRS 进度、划线、收藏和设置会同步到云端，换设备登录即可接着背。',
+    `打开：${link}`,
+    '',
+    '这是一封注册通知，不需要点击验证；如非本人操作，忽略即可。',
+  ].join('\n');
+  const html = `<!doctype html><html><body style="margin:0;background:#f3f0e8;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;color:#20241f">
+  <div style="max-width:520px;margin:0 auto;padding:36px 22px">
+    <div style="background:#244f3f;color:#f7f3e8;border-radius:18px;padding:26px 28px">
+      <div style="font:600 13px/1.4 ui-monospace,monospace;letter-spacing:.18em;opacity:.75">NOUNKILLER</div>
+      <div style="font-family:Georgia,'Songti SC',serif;font-size:30px;margin-top:12px">注册成功</div>
+    </div>
+    <div style="background:#fbfaf5;border:1px solid #e5dfd0;border-radius:18px;padding:26px 28px;margin-top:14px;font-size:15px;line-height:1.85">
+      <p style="margin:0 0 12px">你的邮箱 <b>${email}</b> 已注册 NounKiller。</p>
+      <p style="margin:0 0 12px">题库、SRS 进度、划线、收藏和设置会同步到云端，换设备登录即可接着背。</p>
+      <p style="margin:0 0 18px"><a href="${link}" style="display:inline-block;background:#2f6753;color:#f8f5ea;text-decoration:none;padding:11px 18px;border-radius:10px">打开 NounKiller</a></p>
+      <p style="margin:0;color:#8b8d80;font-size:12.5px">这是一封注册通知，不需要点击验证。如非本人操作，忽略即可。</p>
+    </div>
+  </div></body></html>`;
+  return { to: email, subject: 'NounKiller 注册成功', text, html };
+}
+
+function resetMail(email, code) {
+  const text = [
+    'NounKiller / 名解斩',
+    '',
+    `你的验证码是 ${code}，10 分钟内有效。`,
+    '如果这不是你本人操作，忽略这封邮件即可，密码不会改变。',
+  ].join('\n');
+  const html = `<!doctype html><html><body style="margin:0;background:#f3f0e8;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;color:#20241f">
+  <div style="max-width:520px;margin:0 auto;padding:36px 22px">
+    <div style="background:#fbfaf5;border:1px solid #e5dfd0;border-radius:18px;padding:28px">
+      <div style="font:600 12px/1.4 ui-monospace,monospace;letter-spacing:.18em;color:#8b8d80">PASSWORD RESET</div>
+      <div style="font-family:Georgia,'Songti SC',serif;font-size:26px;margin:10px 0 18px">重置密码</div>
+      <p style="margin:0 0 14px;font-size:14.5px;line-height:1.8">你的 NounKiller 验证码：</p>
+      <div style="font:700 34px/1 ui-monospace,monospace;letter-spacing:.22em;color:#244f3f">${code}</div>
+      <p style="margin:18px 0 0;color:#8b8d80;font-size:12.5px;line-height:1.7">10 分钟内有效。如非本人操作，忽略即可。</p>
+    </div>
+  </div></body></html>`;
+  return { to: email, subject: 'NounKiller 重置密码验证码', text, html };
+}
+
+async function handleRegister(request, env, ctx) {
   const body = await readJson(request);
   const email = normalizeEmail(body.email);
   const password = normalizePassword(body.password);
@@ -209,6 +296,9 @@ async function handleRegister(request, env) {
      VALUES (?, ?, ?, ?, ?, ?, ?, 'online')`,
   ).bind(id, email, hash, salt, isAdmin, now, now).run();
   const token = await createSession(env, id);
+  const mail = welcomeMail(email);
+  const job = sendMail(env, mail).catch((err) => console.error('welcome mail failed', err));
+  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(job);
   return json({
     token,
     user: { id, email, isAdmin: isAdmin === 1, createdAt: now },
@@ -229,6 +319,81 @@ async function handleLogin(request, env) {
   ).bind(now, row.id).run();
   const token = await createSession(env, row.id);
   return json({ token, user: userView(row) });
+}
+
+async function handleForgot(request, env) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  need(env.BREVO_API_KEY, 503, '邮件服务还未配置，请联系管理员');
+  const user = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first();
+  // 不暴露邮箱是否存在。
+  if (!user) return json({ ok: true });
+
+  const now = Date.now();
+  const prev = await env.DB.prepare(
+    "SELECT created_at FROM email_codes WHERE email = ? AND purpose = 'reset'",
+  ).bind(email).first();
+  if (prev && now - prev.created_at < RESET_COOLDOWN_MS) {
+    const wait = Math.ceil((RESET_COOLDOWN_MS - (now - prev.created_at)) / 1000);
+    return fail(429, `验证码刚发过，请 ${wait} 秒后再试`);
+  }
+
+  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
+  const codeHash = await sha256(`${email}:reset:${code}`);
+  await env.DB.prepare(
+    `INSERT INTO email_codes (email, purpose, code_hash, expires_at, attempts, created_at)
+     VALUES (?, 'reset', ?, ?, 0, ?)
+     ON CONFLICT(email, purpose) DO UPDATE SET
+       code_hash = excluded.code_hash, expires_at = excluded.expires_at,
+       attempts = 0, created_at = excluded.created_at`,
+  ).bind(email, codeHash, now + RESET_TTL_MS, now).run();
+
+  try {
+    await sendMail(env, resetMail(email, code));
+  } catch (err) {
+    console.error('reset mail failed', err);
+    await env.DB.prepare("DELETE FROM email_codes WHERE email = ? AND purpose = 'reset'").bind(email).run();
+    return fail(502, '验证码邮件发送失败，请稍后重试');
+  }
+  return json({ ok: true, cooldown: Math.floor(RESET_COOLDOWN_MS / 1000) });
+}
+
+async function handleReset(request, env) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  const code = String(body.code || '').trim();
+  const password = normalizePassword(body.password);
+  need(/^\d{6}$/.test(code), 400, '请输入 6 位数字验证码');
+
+  const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
+  need(user, 400, '验证码不正确或已过期');
+  const row = await env.DB.prepare(
+    "SELECT * FROM email_codes WHERE email = ? AND purpose = 'reset'",
+  ).bind(email).first();
+  need(row, 400, '验证码不正确或已过期');
+  if (Date.now() > row.expires_at) {
+    await env.DB.prepare("DELETE FROM email_codes WHERE email = ? AND purpose = 'reset'").bind(email).run();
+    return fail(400, '验证码已过期，请重新获取');
+  }
+  need(row.attempts < RESET_MAX_ATTEMPTS, 429, '尝试次数过多，请重新获取验证码');
+
+  const expected = await sha256(`${email}:reset:${code}`);
+  if (!sameSecret(expected, row.code_hash)) {
+    await env.DB.prepare(
+      "UPDATE email_codes SET attempts = attempts + 1 WHERE email = ? AND purpose = 'reset'",
+    ).bind(email).run();
+    return fail(400, '验证码不正确或已过期');
+  }
+
+  const salt = bytesToB64(crypto.getRandomValues(new Uint8Array(16)));
+  const hash = await hashPassword(password, salt);
+  await env.DB.batch([
+    env.DB.prepare('UPDATE users SET pass_hash = ?, salt = ? WHERE id = ?').bind(hash, salt, user.id),
+    env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id),
+    env.DB.prepare("DELETE FROM email_codes WHERE email = ? AND purpose = 'reset'").bind(email),
+  ]);
+  const token = await createSession(env, user.id);
+  return json({ token, user: userView(user) });
 }
 
 async function handleMe(request, env) {
@@ -397,7 +562,7 @@ async function handleAdminThread(request, env) {
   return json({ id, createdAt: now }, 201);
 }
 
-async function route(request, env) {
+async function route(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
@@ -405,8 +570,10 @@ async function route(request, env) {
   if (!env.DB) return fail(503, '云端未配置数据库绑定（D1: DB）');
 
   await ensureSchema(env);
-  if (path === '/api/health') return json({ ok: true, cloud: true });
-  if (path === '/api/auth/register' && request.method === 'POST') return handleRegister(request, env);
+  if (path === '/api/health') return json({ ok: true, cloud: true, mail: !!env.BREVO_API_KEY });
+  if (path === '/api/auth/register' && request.method === 'POST') return handleRegister(request, env, ctx);
+  if (path === '/api/auth/forgot' && request.method === 'POST') return handleForgot(request, env);
+  if (path === '/api/auth/reset' && request.method === 'POST') return handleReset(request, env);
   if (path === '/api/auth/login' && request.method === 'POST') return handleLogin(request, env);
   if (path === '/api/auth/logout' && request.method === 'POST') {
     const user = await requireUser(request, env);
@@ -430,9 +597,9 @@ async function route(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
-      return await route(request, env);
+      return await route(request, env, ctx);
     } catch (error) {
       if (error instanceof HttpError) return fail(error.status, error.message);
       console.error('[nounkiller] api error', error && error.stack ? error.stack : error);
