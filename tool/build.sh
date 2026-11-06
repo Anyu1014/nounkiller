@@ -17,7 +17,7 @@ NODE="${NODE_BIN:-/Users/y/toolchains/bin/node}"
 
 # 版本策略：只递增 major.minor，patch 恒为 0（如 1.3.0 → 1.4.0）
 VERSION="$(sed -nE "s/.*versionName ['\"]([^'\"]+)['\"].*/\1/p" "$SRC/android/app/build.gradle" | head -1)"
-VERSION="${VERSION:-1.3.0}"
+VERSION="${VERSION:-1.4.0}"
 APK_NAME="NounKiller-$VERSION.apk"
 IPA_NAME="NounKiller-$VERSION.ipa"
 
@@ -31,8 +31,8 @@ clean() {
 sync_web() {
   say "同步 web → Android assets / iOS www"
   mkdir -p "$SRC/android/app/src/main/assets/www" "$IOS/NounKiller/www"
-  rsync -a --delete "$SRC/web/" "$SRC/android/app/src/main/assets/www/"
-  rsync -a --delete "$SRC/web/" "$IOS/NounKiller/www/"
+  rsync -a --delete --exclude _worker.js "$SRC/web/" "$SRC/android/app/src/main/assets/www/"
+  rsync -a --delete --exclude _worker.js "$SRC/web/" "$IOS/NounKiller/www/"
 }
 
 # 同名产物内容不同 → 先把旧文件搬进 history，再放新文件
