@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NounKiller 隐私说明</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; background: #f6f4ee; color: #23281f;
+    font: 16px/1.85 "PingFang SC", "Songti SC", system-ui, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 64px 24px 96px; }
+  .mark { width: 44px; height: 44px; border-radius: 12px; background: #2f5d46;
+    color: #f6f4ee; display: grid; place-items: center; font: 600 22px/1 Georgia, serif; }
+  h1 { font-family: "Songti SC", Georgia, serif; font-size: 34px; font-weight: 600;
+    margin: 26px 0 8px; letter-spacing: .02em; }
+  .sub { color: #7d8274; font-size: 14px; margin-bottom: 36px; }
+  h2 { font-size: 17px; margin: 34px 0 8px; }
+  p, li { color: #3d4238; }
+  ul { padding-left: 20px; }
+  a { color: #2f5d46; }
+  .foot { margin-top: 48px; padding-top: 20px; border-top: 1px solid #e2ded2;
+    color: #858a7c; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark">n.</div>
+  <h1>隐私说明</h1>
+  <p class="sub">NounKiller · 名解斩 · 更新于 2026-11-06</p>
+
+  <p>NounKiller 是一个名词解释背诵工具。我们尽量少收集数据，只保留让账号与云端同步正常工作所必需的信息。</p>
+
+  <h2>我们保存什么</h2>
+  <ul>
+    <li>注册邮箱，以及经过 PBKDF2 加盐哈希后的密码（不保存明文密码）。</li>
+    <li>你主动同步的题库、学习进度、划线高亮、收藏与偏好设置。</li>
+    <li>登录会话令牌的哈希、最近在线时间，用于保持登录与显示在线状态。</li>
+    <li>你主动发送给管理员的留言内容。</li>
+  </ul>
+
+  <h2>我们用它做什么</h2>
+  <ul>
+    <li>登录与跨设备同步；忘记密码由管理员协助。</li>
+    <li>在注册成功或恢复数据时发送一封事务性通知邮件。</li>
+    <li>回复你主动提交的留言。</li>
+  </ul>
+  <p>我们不出售数据，不用于广告投放，也不会把题库内容用于训练模型。</p>
+
+  <h2>邮件</h2>
+  <p>通知邮件仅用于账号相关事务（注册成功、数据恢复）。邮件通过 QQ 邮箱 SMTP 发送，收件地址只用于投递该封邮件。</p>
+
+  <h2>存储与删除</h2>
+  <p>数据保存在 Cloudflare 的托管存储中。你可以随时在账号面板退出登录；如需删除账号及云端数据，请通过应用内「留言」联系管理员，我们会在核实后删除。</p>
+
+  <h2>本地数据</h2>
+  <p>未登录时，题库与进度只保存在你的浏览器或 App 本地。清除浏览器数据会同时清除本地记录。</p>
+
+  <p class="foot">NounKiller · <a href="/">返回应用</a></p>
+</main>
+</body>
+</html>

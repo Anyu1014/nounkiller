@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS users (
   is_admin INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL DEFAULT 0,
-  presence TEXT NOT NULL DEFAULT 'away'
+  presence TEXT NOT NULL DEFAULT 'away',
+  deleted_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -41,13 +42,4 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, created_at);
 
--- 邮箱验证码（目前只用于自助重置密码；注册通知不需要验证码）
-CREATE TABLE IF NOT EXISTS email_codes (
-  email TEXT NOT NULL,
-  purpose TEXT NOT NULL,
-  code_hash TEXT NOT NULL,
-  expires_at INTEGER NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (email, purpose)
-);
+-- 已有库迁移：ALTER TABLE users ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0;

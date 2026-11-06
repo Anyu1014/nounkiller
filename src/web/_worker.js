@@ -6,10 +6,13 @@
  *
  * 设计边界：
  * - 登录用邮箱 + 密码（PBKDF2-SHA256），会话令牌只存哈希；不依赖第三方账号系统。
- * - 注册会发一封「注册成功」通知邮件（不验证）；忘记密码走邮箱 6 位验证码重置。
- * - 邮件通过 Brevo HTTP API 发送，密钥只放 Cloudflare Secret（BREVO_API_KEY）。
+ * - 注册会发一封「注册成功」通知邮件（不验证）；忘记密码提示联系管理员。
+ * - 邮件通过 QQ 邮箱 SMTP（smtp.qq.com:465）发送，授权码只放 Cloudflare Secret。
+ * - 管理员注销账号后数据保留 7 天；同一邮箱重新注册即可恢复。
  * - 每个用户一条 JSON 快照（题库、SRS、划线、设置、收藏都在里面），last-write-wins。
  */
+
+import { connect } from 'cloudflare:sockets';
 
 const SESSION_DAYS = 60;
 const SESSION_MS = SESSION_DAYS * 24 * 60 * 60 * 1000;
@@ -18,9 +21,9 @@ const PBKDF2_ITERATIONS = 100000;
 const MAX_PAYLOAD_BYTES = 900000;
 const MAX_MESSAGE = 2000;
 const ONLINE_WINDOW_MS = 90 * 1000;
-const RESET_TTL_MS = 10 * 60 * 1000;
-const RESET_COOLDOWN_MS = 60 * 1000;
-const RESET_MAX_ATTEMPTS = 5;
+// 管理员注销账号后，云端数据保留 7 天；期间同邮箱可重新注册恢复。
+const RESTORE_DAYS = 7;
+const RESTORE_MS = RESTORE_DAYS * 24 * 60 * 60 * 1000;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -120,7 +123,8 @@ async function ensureSchema(env) {
       `CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, pass_hash TEXT NOT NULL, salt TEXT NOT NULL,
         is_admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
-        last_seen_at INTEGER NOT NULL DEFAULT 0, presence TEXT NOT NULL DEFAULT 'away')`,
+        last_seen_at INTEGER NOT NULL DEFAULT 0, presence TEXT NOT NULL DEFAULT 'away',
+        deleted_at INTEGER NOT NULL DEFAULT 0)`,
       `CREATE TABLE IF NOT EXISTS sessions (
         token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL,
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
@@ -133,14 +137,31 @@ async function ensureSchema(env) {
         body TEXT NOT NULL, created_at INTEGER NOT NULL,
         read_by_user INTEGER NOT NULL DEFAULT 0, read_by_admin INTEGER NOT NULL DEFAULT 0)`,
       'CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, created_at)',
-      `CREATE TABLE IF NOT EXISTS email_codes (
-        email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL,
-        expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL, PRIMARY KEY (email, purpose))`,
     ];
     for (const sql of statements) await env.DB.prepare(sql).run();
+    // 老库补列；已存在时会报 duplicate column，忽略即可。
+    try {
+      await env.DB.prepare('ALTER TABLE users ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0').run();
+    } catch {}
   })();
   return schemaReady;
+}
+
+async function purgeUserData(env, userId) {
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM user_data WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM messages WHERE user_id = ?').bind(userId),
+    env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId),
+  ]);
+}
+
+async function purgeExpiredUsers(env) {
+  const cutoff = Date.now() - RESTORE_MS;
+  const rows = await env.DB.prepare(
+    'SELECT id FROM users WHERE deleted_at > 0 AND deleted_at <= ? AND is_admin = 0 LIMIT 50',
+  ).bind(cutoff).all();
+  for (const row of rows.results || []) await purgeUserData(env, row.id);
 }
 
 function adminEmails(env) {
@@ -164,7 +185,8 @@ async function requireUser(request, env) {
   const tokenHash = await sha256(match[1].trim());
   const row = await env.DB.prepare(
     `SELECT u.id, u.email, u.is_admin, u.created_at, u.last_seen_at, s.expires_at
-     FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?`,
+     FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.token_hash = ? AND u.deleted_at = 0`,
   ).bind(tokenHash).first();
   need(row && row.expires_at > Date.now(), 401, '登录已过期，请重新登录');
   return row;
@@ -202,41 +224,131 @@ async function unreadFor(env, userId) {
 const MAIL_FROM_FALLBACK = '2164206282@qq.com';
 
 function mailFrom(env) {
-  return String(env.MAIL_FROM || MAIL_FROM_FALLBACK).trim();
+  return String(env.QQ_SMTP_USER || env.MAIL_FROM || MAIL_FROM_FALLBACK).trim();
 }
 
-// Brevo 事务邮件；没有配置密钥时静默跳过（注册通知不能阻断注册）。
-async function sendMail(env, { to, subject, text, html }) {
-  if (!env.BREVO_API_KEY) return { sent: false, reason: 'mail_not_configured' };
-  const endpoint = env.MAIL_API_URL || 'https://api.brevo.com/v3/smtp/email';
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'api-key': env.BREVO_API_KEY,
-      'content-type': 'application/json',
-      accept: 'application/json',
-    },
-    body: JSON.stringify({
-      sender: { name: String(env.MAIL_FROM_NAME || 'NounKiller').trim(), email: mailFrom(env) },
-      to: [{ email: to }],
-      subject,
-      textContent: text,
-      htmlContent: html,
-    }),
+function b64utf8(value) {
+  return bytesToB64(new TextEncoder().encode(String(value)));
+}
+
+function mailHeaderValue(value) {
+  const text = String(value || '').replace(/[\r\n]+/g, ' ').trim();
+  return /^[\x20-\x7e]*$/.test(text) ? text : `=?UTF-8?B?${b64utf8(text)}?=`;
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout`)), ms);
   });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`mail ${res.status}: ${detail.slice(0, 240)}`);
-  }
-  return { sent: true };
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function welcomeMail(email) {
+function mailBody(env, { from, to, subject, text, html }) {
+  const boundary = `nk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const block = (value) => b64utf8(value).replace(/.{1,76}/g, (line) => `${line}\r\n`);
+  const headers = [
+    `From: ${mailHeaderValue(env.MAIL_FROM_NAME || 'NounKiller')} <${from}>`,
+    `To: <${to}>`,
+    `Subject: ${mailHeaderValue(subject)}`,
+    `Date: ${new Date().toUTCString()}`,
+    `Message-ID: <${Date.now()}.${Math.random().toString(36).slice(2)}@nounkiller.pages.dev>`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  ];
+  const parts = [
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    block(text),
+    `--${boundary}`,
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    block(html),
+    `--${boundary}--`,
+  ];
+  return `${headers.join('\r\n')}\r\n\r\n${parts.join('\r\n')}`.replace(/(^|\r\n)\./g, '$1..');
+}
+
+// QQ 邮箱 SMTP over TLS；没有配置授权码时静默跳过，注册流程不受影响。
+async function smtpSend(env, mail) {
+  const host = String(env.QQ_SMTP_HOST || 'smtp.qq.com').trim();
+  const port = Number(env.QQ_SMTP_PORT || 465);
+  const user = String(env.QQ_SMTP_USER || '').trim();
+  const pass = String(env.QQ_SMTP_PASS || '');
+  const from = mailFrom(env);
+  if (!user || !pass) throw new Error('mail_not_configured');
+
+  const socket = connect({ hostname: host, port }, { secureTransport: 'on' });
+  const decoder = new TextDecoder();
+  let writer;
+  let reader;
+  let buffered = '';
+
+  const readReply = async () => {
+    const lines = [];
+    for (;;) {
+      const idx = buffered.indexOf('\r\n');
+      if (idx >= 0) {
+        const line = buffered.slice(0, idx);
+        buffered = buffered.slice(idx + 2);
+        lines.push(line);
+        if (/^\d{3} /.test(line)) return { code: Number(line.slice(0, 3)), text: lines.join('\n') };
+        continue;
+      }
+      const chunk = await withTimeout(reader.read(), 10000, 'smtp read');
+      if (chunk.done) throw new Error('smtp closed');
+      buffered += decoder.decode(chunk.value, { stream: true });
+    }
+  };
+
+  const command = async (line) => {
+    await withTimeout(writer.write(new TextEncoder().encode(`${line}\r\n`)), 10000, 'smtp write');
+    return readReply();
+  };
+
+  const expect = (reply, code, label) => {
+    if (reply.code !== code) throw new Error(`smtp ${label} ${reply.code}: ${reply.text.slice(0, 180)}`);
+  };
+
+  try {
+    await withTimeout(socket.opened, 10000, 'smtp connect');
+    writer = socket.writable.getWriter();
+    reader = socket.readable.getReader();
+    expect(await readReply(), 220, 'greeting');
+    expect(await command('EHLO nounkiller.pages.dev'), 250, 'ehlo');
+    expect(await command('AUTH LOGIN'), 334, 'auth');
+    expect(await command(btoa(user)), 334, 'user');
+    expect(await command(btoa(pass)), 235, 'password');
+    expect(await command(`MAIL FROM:<${from}>`), 250, 'from');
+    expect(await command(`RCPT TO:<${mail.to}>`), 250, 'to');
+    expect(await command('DATA'), 354, 'data');
+    const body = mailBody(env, { from, ...mail });
+    await withTimeout(writer.write(new TextEncoder().encode(`${body}\r\n.\r\n`)), 10000, 'smtp body');
+    expect(await readReply(), 250, 'send');
+    await command('QUIT').catch(() => {});
+    return { sent: true };
+  } finally {
+    try { if (writer) writer.releaseLock(); } catch {}
+    try { if (reader) reader.releaseLock(); } catch {}
+    try { socket.close(); } catch {}
+  }
+}
+
+async function sendMail(env, mail) {
+  if (!env.QQ_SMTP_USER || !env.QQ_SMTP_PASS) return { sent: false, reason: 'mail_not_configured' };
+  return smtpSend(env, mail);
+}
+
+function welcomeMail(email, restored = false) {
   const link = 'https://nounkiller.pages.dev';
+  const title = restored ? '数据已恢复' : '注册成功';
   const text = [
     'NounKiller / 名解斩',
     '',
-    `你的邮箱 ${email} 已注册成功。`,
+    restored ? `你的邮箱 ${email} 重新注册成功，云端数据已恢复。` : `你的邮箱 ${email} 已注册成功。`,
     '题库、SRS 进度、划线、收藏和设置会同步到云端，换设备登录即可接着背。',
     `打开：${link}`,
     '',
@@ -246,62 +358,59 @@ function welcomeMail(email) {
   <div style="max-width:520px;margin:0 auto;padding:36px 22px">
     <div style="background:#244f3f;color:#f7f3e8;border-radius:18px;padding:26px 28px">
       <div style="font:600 13px/1.4 ui-monospace,monospace;letter-spacing:.18em;opacity:.75">NOUNKILLER</div>
-      <div style="font-family:Georgia,'Songti SC',serif;font-size:30px;margin-top:12px">注册成功</div>
+      <div style="font-family:Georgia,'Songti SC',serif;font-size:30px;margin-top:12px">${title}</div>
     </div>
     <div style="background:#fbfaf5;border:1px solid #e5dfd0;border-radius:18px;padding:26px 28px;margin-top:14px;font-size:15px;line-height:1.85">
-      <p style="margin:0 0 12px">你的邮箱 <b>${email}</b> 已注册 NounKiller。</p>
+      <p style="margin:0 0 12px">你的邮箱 <b>${email}</b> ${restored ? '重新注册成功，云端数据已恢复。' : '已注册 NounKiller。'}</p>
       <p style="margin:0 0 12px">题库、SRS 进度、划线、收藏和设置会同步到云端，换设备登录即可接着背。</p>
       <p style="margin:0 0 18px"><a href="${link}" style="display:inline-block;background:#2f6753;color:#f8f5ea;text-decoration:none;padding:11px 18px;border-radius:10px">打开 NounKiller</a></p>
       <p style="margin:0;color:#8b8d80;font-size:12.5px">这是一封注册通知，不需要点击验证。如非本人操作，忽略即可。</p>
     </div>
   </div></body></html>`;
-  return { to: email, subject: 'NounKiller 注册成功', text, html };
-}
-
-function resetMail(email, code) {
-  const text = [
-    'NounKiller / 名解斩',
-    '',
-    `你的验证码是 ${code}，10 分钟内有效。`,
-    '如果这不是你本人操作，忽略这封邮件即可，密码不会改变。',
-  ].join('\n');
-  const html = `<!doctype html><html><body style="margin:0;background:#f3f0e8;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;color:#20241f">
-  <div style="max-width:520px;margin:0 auto;padding:36px 22px">
-    <div style="background:#fbfaf5;border:1px solid #e5dfd0;border-radius:18px;padding:28px">
-      <div style="font:600 12px/1.4 ui-monospace,monospace;letter-spacing:.18em;color:#8b8d80">PASSWORD RESET</div>
-      <div style="font-family:Georgia,'Songti SC',serif;font-size:26px;margin:10px 0 18px">重置密码</div>
-      <p style="margin:0 0 14px;font-size:14.5px;line-height:1.8">你的 NounKiller 验证码：</p>
-      <div style="font:700 34px/1 ui-monospace,monospace;letter-spacing:.22em;color:#244f3f">${code}</div>
-      <p style="margin:18px 0 0;color:#8b8d80;font-size:12.5px;line-height:1.7">10 分钟内有效。如非本人操作，忽略即可。</p>
-    </div>
-  </div></body></html>`;
-  return { to: email, subject: 'NounKiller 重置密码验证码', text, html };
+  return { to: email, subject: `NounKiller ${title}`, text, html };
 }
 
 async function handleRegister(request, env, ctx) {
   const body = await readJson(request);
   const email = normalizeEmail(body.email);
   const password = normalizePassword(body.password);
-  const exists = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first();
-  need(!exists, 409, '这个邮箱已经注册，直接登录即可');
+  await purgeExpiredUsers(env);
+  let existing = await env.DB.prepare(
+    'SELECT id, created_at, deleted_at FROM users WHERE email = ?',
+  ).bind(email).first();
+  const now = Date.now();
+  if (existing && existing.deleted_at && now - existing.deleted_at >= RESTORE_MS) {
+    await purgeUserData(env, existing.id);
+    existing = null;
+  }
+  need(!existing || existing.deleted_at > 0, 409, '这个邮箱已经注册，直接登录即可');
 
   const salt = bytesToB64(crypto.getRandomValues(new Uint8Array(16)));
   const hash = await hashPassword(password, salt);
   // 管理员只由 ADMIN_EMAILS 指定；不做“首个用户自动管理员”，避免公开站点被抢注。
   const isAdmin = adminEmails(env).includes(email) ? 1 : 0;
-  const id = crypto.randomUUID();
-  const now = Date.now();
-  await env.DB.prepare(
-    `INSERT INTO users (id, email, pass_hash, salt, is_admin, created_at, last_seen_at, presence)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'online')`,
-  ).bind(id, email, hash, salt, isAdmin, now, now).run();
+  const restored = Boolean(existing);
+  const id = existing ? existing.id : crypto.randomUUID();
+  const createdAt = existing ? existing.created_at : now;
+  if (restored) {
+    // 注销后 7 天内同邮箱重新注册：复用原 id，user_data 原样保留。
+    await env.DB.prepare(
+      `UPDATE users SET pass_hash = ?, salt = ?, is_admin = ?, last_seen_at = ?,
+        presence = 'online', deleted_at = 0 WHERE id = ?`,
+    ).bind(hash, salt, isAdmin, now, id).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO users (id, email, pass_hash, salt, is_admin, created_at, last_seen_at, presence, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'online', 0)`,
+    ).bind(id, email, hash, salt, isAdmin, now, now).run();
+  }
   const token = await createSession(env, id);
-  const mail = welcomeMail(email);
+  const mail = welcomeMail(email, restored);
   const job = sendMail(env, mail).catch((err) => console.error('welcome mail failed', err));
   if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(job);
   return json({
     token,
-    user: { id, email, isAdmin: isAdmin === 1, createdAt: now },
+    user: { id, email, isAdmin: isAdmin === 1, createdAt, restored },
   }, 201);
 }
 
@@ -311,6 +420,7 @@ async function handleLogin(request, env) {
   const password = String(body.password || '');
   const row = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
   need(row, 401, '邮箱或密码不正确');
+  need(!row.deleted_at, 403, '账号已注销；7 天内可用同一邮箱重新注册，数据会恢复');
   const hash = await hashPassword(password, row.salt);
   need(sameSecret(hash, row.pass_hash), 401, '邮箱或密码不正确');
   const now = Date.now();
@@ -321,79 +431,12 @@ async function handleLogin(request, env) {
   return json({ token, user: userView(row) });
 }
 
-async function handleForgot(request, env) {
-  const body = await readJson(request);
-  const email = normalizeEmail(body.email);
-  need(env.BREVO_API_KEY, 503, '邮件服务还未配置，请联系管理员');
-  const user = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first();
-  // 不暴露邮箱是否存在。
-  if (!user) return json({ ok: true });
-
-  const now = Date.now();
-  const prev = await env.DB.prepare(
-    "SELECT created_at FROM email_codes WHERE email = ? AND purpose = 'reset'",
-  ).bind(email).first();
-  if (prev && now - prev.created_at < RESET_COOLDOWN_MS) {
-    const wait = Math.ceil((RESET_COOLDOWN_MS - (now - prev.created_at)) / 1000);
-    return fail(429, `验证码刚发过，请 ${wait} 秒后再试`);
-  }
-
-  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
-  const codeHash = await sha256(`${email}:reset:${code}`);
-  await env.DB.prepare(
-    `INSERT INTO email_codes (email, purpose, code_hash, expires_at, attempts, created_at)
-     VALUES (?, 'reset', ?, ?, 0, ?)
-     ON CONFLICT(email, purpose) DO UPDATE SET
-       code_hash = excluded.code_hash, expires_at = excluded.expires_at,
-       attempts = 0, created_at = excluded.created_at`,
-  ).bind(email, codeHash, now + RESET_TTL_MS, now).run();
-
-  try {
-    await sendMail(env, resetMail(email, code));
-  } catch (err) {
-    console.error('reset mail failed', err);
-    await env.DB.prepare("DELETE FROM email_codes WHERE email = ? AND purpose = 'reset'").bind(email).run();
-    return fail(502, '验证码邮件发送失败，请稍后重试');
-  }
-  return json({ ok: true, cooldown: Math.floor(RESET_COOLDOWN_MS / 1000) });
-}
-
-async function handleReset(request, env) {
-  const body = await readJson(request);
-  const email = normalizeEmail(body.email);
-  const code = String(body.code || '').trim();
-  const password = normalizePassword(body.password);
-  need(/^\d{6}$/.test(code), 400, '请输入 6 位数字验证码');
-
-  const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
-  need(user, 400, '验证码不正确或已过期');
-  const row = await env.DB.prepare(
-    "SELECT * FROM email_codes WHERE email = ? AND purpose = 'reset'",
-  ).bind(email).first();
-  need(row, 400, '验证码不正确或已过期');
-  if (Date.now() > row.expires_at) {
-    await env.DB.prepare("DELETE FROM email_codes WHERE email = ? AND purpose = 'reset'").bind(email).run();
-    return fail(400, '验证码已过期，请重新获取');
-  }
-  need(row.attempts < RESET_MAX_ATTEMPTS, 429, '尝试次数过多，请重新获取验证码');
-
-  const expected = await sha256(`${email}:reset:${code}`);
-  if (!sameSecret(expected, row.code_hash)) {
-    await env.DB.prepare(
-      "UPDATE email_codes SET attempts = attempts + 1 WHERE email = ? AND purpose = 'reset'",
-    ).bind(email).run();
-    return fail(400, '验证码不正确或已过期');
-  }
-
-  const salt = bytesToB64(crypto.getRandomValues(new Uint8Array(16)));
-  const hash = await hashPassword(password, salt);
-  await env.DB.batch([
-    env.DB.prepare('UPDATE users SET pass_hash = ?, salt = ? WHERE id = ?').bind(hash, salt, user.id),
-    env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id),
-    env.DB.prepare("DELETE FROM email_codes WHERE email = ? AND purpose = 'reset'").bind(email),
-  ]);
-  const token = await createSession(env, user.id);
-  return json({ token, user: userView(user) });
+async function handleForgot() {
+  return json({
+    ok: true,
+    contactAdmin: true,
+    message: '找回密码请联系管理员：管理员注销账号后，7 天内用同一邮箱重新注册即可设置新密码并恢复数据。',
+  });
 }
 
 async function handleMe(request, env) {
@@ -485,8 +528,9 @@ async function requireAdmin(request, env) {
 
 async function handleAdminUsers(request, env) {
   await requireAdmin(request, env);
+  await purgeExpiredUsers(env);
   const rows = await env.DB.prepare(
-    `SELECT u.id, u.email, u.created_at, u.last_seen_at, u.is_admin,
+    `SELECT u.id, u.email, u.created_at, u.last_seen_at, u.is_admin, u.deleted_at,
             d.payload, d.updated_at,
             (SELECT COUNT(*) FROM messages m
               WHERE m.user_id = u.id AND m.sender = 'user' AND m.read_by_admin = 0) AS unread
@@ -511,8 +555,10 @@ async function handleAdminUsers(request, env) {
       email: row.email,
       createdAt: row.created_at,
       lastSeenAt: row.last_seen_at,
-      online: now - row.last_seen_at < ONLINE_WINDOW_MS,
+      online: !row.deleted_at && now - row.last_seen_at < ONLINE_WINDOW_MS,
       isAdmin: row.is_admin === 1,
+      deletedAt: row.deleted_at || 0,
+      purgeAt: row.deleted_at ? row.deleted_at + RESTORE_MS : 0,
       unread: row.unread || 0,
       decks,
       cards,
@@ -521,6 +567,28 @@ async function handleAdminUsers(request, env) {
     };
   });
   return json({ users, onlineWindow: ONLINE_WINDOW_MS, now });
+}
+
+async function handleAdminDelete(request, env) {
+  const admin = await requireAdmin(request, env);
+  const body = await readJson(request);
+  const userId = String(body.userId || '');
+  const email = normalizeEmail(body.email);
+  need(userId, 400, '缺少用户');
+  const target = await env.DB.prepare(
+    'SELECT id, email, is_admin, deleted_at FROM users WHERE id = ?',
+  ).bind(userId).first();
+  need(target, 404, '用户不存在');
+  need(target.id !== admin.id, 400, '不能注销当前管理员账号');
+  need(target.is_admin === 0, 400, '管理员账号不能注销');
+  need(email === target.email, 400, '邮箱确认不匹配');
+  need(!target.deleted_at, 409, '该账号已经注销');
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE users SET deleted_at = ?, presence = 'away' WHERE id = ?").bind(now, userId),
+    env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId),
+  ]);
+  return json({ ok: true, deletedAt: now, purgeAt: now + RESTORE_MS });
 }
 
 async function handleAdminThread(request, env) {
@@ -570,10 +638,9 @@ async function route(request, env, ctx) {
   if (!env.DB) return fail(503, '云端未配置数据库绑定（D1: DB）');
 
   await ensureSchema(env);
-  if (path === '/api/health') return json({ ok: true, cloud: true, mail: !!env.BREVO_API_KEY });
+  if (path === '/api/health') return json({ ok: true, cloud: true, mail: !!(env.QQ_SMTP_USER && env.QQ_SMTP_PASS) });
   if (path === '/api/auth/register' && request.method === 'POST') return handleRegister(request, env, ctx);
   if (path === '/api/auth/forgot' && request.method === 'POST') return handleForgot(request, env);
-  if (path === '/api/auth/reset' && request.method === 'POST') return handleReset(request, env);
   if (path === '/api/auth/login' && request.method === 'POST') return handleLogin(request, env);
   if (path === '/api/auth/logout' && request.method === 'POST') {
     const user = await requireUser(request, env);
@@ -590,6 +657,7 @@ async function route(request, env, ctx) {
     return handleUserMessages(request, env);
   }
   if (path === '/api/admin/users' && request.method === 'GET') return handleAdminUsers(request, env);
+  if (path === '/api/admin/users/delete' && request.method === 'POST') return handleAdminDelete(request, env);
   if (path === '/api/admin/messages' && (request.method === 'GET' || request.method === 'POST')) {
     return handleAdminThread(request, env);
   }
