@@ -143,3 +143,150 @@ test('注销后 7 天内重新注册恢复数据', { skip: health && ADMIN ? fal
     method: 'POST', token: ADMIN, body: { userId: reg.data.user.id, email },
   });
 });
+
+test('群组：创建、群号申请、邀请、群设置、分享题库、踢人、退群', { skip: health ? false : '需要 Pages D1 运行时' }, async () => {
+  const stamp = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+  const ownerEmail = `owner-${stamp}@nk.local`;
+  const memberEmail = `member-${stamp}@nk.local`;
+  const guestEmail = `guest-${stamp}@nk.local`;
+  const register = (email) => call('/api/auth/register', { method: 'POST', body: { email, password: 'grouppass123' } });
+  const owner = (await register(ownerEmail)).data;
+  const member = (await register(memberEmail)).data;
+  const guest = (await register(guestEmail)).data;
+  assert.ok(owner.token && member.token && guest.token);
+
+  const created = await call('/api/group/create', { method: 'POST', token: owner.token, body: { name: '测试群组' } });
+  assert.equal(created.status, 200);
+  const group = created.data.group;
+  assert.match(group.groupNo, /^\d{8}$/);
+  assert.equal(group.role, 'owner');
+
+  const list0 = await call('/api/group/list', { token: owner.token });
+  assert.equal(list0.status, 200);
+  assert.equal(list0.data.groups.length, 1);
+  assert.equal(list0.data.groups[0].id, group.id);
+
+  // 群号申请 → 群主审批
+  const join = await call('/api/group/join', { method: 'POST', token: member.token, body: { groupNo: group.groupNo } });
+  assert.equal(join.status, 200);
+  assert.equal(join.data.pending, true);
+  const repeat = await call('/api/group/join', { method: 'POST', token: member.token, body: { groupNo: group.groupNo } });
+  assert.equal(repeat.status, 200);
+  assert.equal(repeat.data.pending, true);
+
+  const inboxOwner = await call('/api/group/inbox', { token: owner.token });
+  assert.equal(inboxOwner.data.joinRequests.length, 1);
+  const request = inboxOwner.data.joinRequests[0];
+  assert.equal(request.groupId, group.id);
+  const approved = await call('/api/group/request/respond', {
+    method: 'POST', token: owner.token, body: { requestId: request.id, accept: true },
+  });
+  assert.equal(approved.status, 200);
+
+  const memberList = await call('/api/group/list', { token: member.token });
+  assert.ok(memberList.data.groups.some((g) => g.id === group.id && g.role === 'member'));
+
+  // 邮箱邀请 → 被邀请人在消息里接受
+  const invited = await call('/api/group/invite', {
+    method: 'POST', token: owner.token, body: { groupId: group.id, email: guestEmail },
+  });
+  assert.equal(invited.status, 200);
+  const inboxGuest = await call('/api/group/inbox', { token: guest.token });
+  assert.equal(inboxGuest.data.invites.length, 1);
+  assert.equal(inboxGuest.data.invites[0].groupId, group.id);
+  const accepted = await call('/api/group/invite/respond', {
+    method: 'POST', token: guest.token, body: { inviteId: inboxGuest.data.invites[0].id, accept: true },
+  });
+  assert.equal(accepted.status, 200);
+
+  // 群设置：成员列表、改名权限
+  const settings = await call('/api/group/settings?groupId=' + encodeURIComponent(group.id), { token: owner.token });
+  assert.equal(settings.status, 200);
+  assert.equal(settings.data.isOwner, true);
+  assert.equal(settings.data.members.length, 3);
+  assert.equal(settings.data.members.filter((m) => m.owner).length, 1);
+  const guestId = settings.data.members.find((m) => m.email === guestEmail).userId;
+  assert.ok(guestId);
+
+  const renamed = await call('/api/group/rename', {
+    method: 'POST', token: owner.token, body: { groupId: group.id, name: '改名后的群' },
+  });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.data.name, '改名后的群');
+  const denied = await call('/api/group/rename', {
+    method: 'POST', token: member.token, body: { groupId: group.id, name: '我不配' },
+  });
+  assert.equal(denied.status, 403);
+
+  // 客户端直接分享题库（不依赖云端快照），空词条被丢弃
+  const sent = await call('/api/group/messages', {
+    method: 'POST', token: member.token,
+    body: {
+      groupId: group.id, body: '分享给你',
+      deck: { name: '群组分享题库', cards: [{ term: '分享名词', def: '分享解释。' }, { term: '', def: '空词条' }] },
+    },
+  });
+  assert.equal(sent.status, 200);
+  const thread = await call('/api/group/messages?groupId=' + encodeURIComponent(group.id), { token: guest.token });
+  assert.equal(thread.status, 200);
+  const msg = thread.data.messages.find((m) => m.kind === 'deck');
+  assert.ok(msg);
+  assert.equal(msg.deckName, '群组分享题库');
+  assert.equal(msg.deckCount, 1);
+  assert.equal(msg.name, memberEmail.split('@')[0]);
+
+  const preview = await call('/api/group/deck?messageId=' + encodeURIComponent(msg.id), { token: guest.token });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.deckName, '群组分享题库');
+  assert.deepEqual(preview.data.cards, [{ term: '分享名词', def: '分享解释。' }]);
+
+  const imported = await call('/api/group/import', { method: 'POST', token: guest.token, body: { messageId: msg.id } });
+  assert.equal(imported.status, 200);
+  assert.deepEqual(imported.data.cards, [{ term: '分享名词', def: '分享解释。' }]);
+
+  const files = await call('/api/group/settings?groupId=' + encodeURIComponent(group.id), { token: owner.token });
+  assert.equal(files.data.files.length, 1);
+  assert.equal(files.data.files[0].deckName, '群组分享题库');
+
+  // 成员忽略群文件：只影响自己
+  const ignored = await call('/api/group/file/ignore', {
+    method: 'POST', token: guest.token, body: { messageId: msg.id },
+  });
+  assert.equal(ignored.status, 200);
+  const guestFiles = await call('/api/group/settings?groupId=' + encodeURIComponent(group.id), { token: guest.token });
+  assert.equal(guestFiles.data.files.length, 0);
+  const ownerFiles = await call('/api/group/settings?groupId=' + encodeURIComponent(group.id), { token: owner.token });
+  assert.equal(ownerFiles.data.files.length, 1);
+
+  // 非群主不能删除群文件；群主删除后群文件与聊天里的分享一起消失
+  const deleteDenied = await call('/api/group/file/delete', {
+    method: 'POST', token: guest.token, body: { messageId: msg.id },
+  });
+  assert.equal(deleteDenied.status, 403);
+  const removed = await call('/api/group/file/delete', {
+    method: 'POST', token: owner.token, body: { messageId: msg.id },
+  });
+  assert.equal(removed.status, 200);
+  const noFiles = await call('/api/group/settings?groupId=' + encodeURIComponent(group.id), { token: owner.token });
+  assert.equal(noFiles.data.files.length, 0);
+  const threadAfter = await call('/api/group/messages?groupId=' + encodeURIComponent(group.id), { token: member.token });
+  assert.equal(threadAfter.data.messages.filter((m) => m.kind === 'deck').length, 0);
+
+  // 群主踢人
+  const kicked = await call('/api/group/kick', {
+    method: 'POST', token: owner.token, body: { groupId: group.id, userId: guestId },
+  });
+  assert.equal(kicked.status, 200);
+  const guestAfter = await call('/api/group/messages?groupId=' + encodeURIComponent(group.id), { token: guest.token });
+  assert.equal(guestAfter.status, 403);
+
+  // 成员退群；群主最后退出时解散
+  const left = await call('/api/group/leave', { method: 'POST', token: member.token, body: { groupId: group.id } });
+  assert.equal(left.status, 200);
+  assert.equal(left.data.left, true);
+  const dissolved = await call('/api/group/leave', { method: 'POST', token: owner.token, body: { groupId: group.id } });
+  assert.equal(dissolved.status, 200);
+  assert.equal(dissolved.data.deleted, true);
+  const listEnd = await call('/api/group/list', { token: owner.token });
+  assert.equal(listEnd.data.groups.length, 0);
+});

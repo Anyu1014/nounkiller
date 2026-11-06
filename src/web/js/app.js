@@ -9,6 +9,8 @@
   var store = window.MJZ.store.create();
   var S = store.state;
 
+  var APP_VERSION = (document.querySelector('meta[name="app-version"]') || {}).content || '2.0.0';
+
   var RATING_LABEL = { known: '熟悉', fuzzy: '不熟悉', unknown: '不认识' };
   var RATING_ORDER = ['unknown', 'fuzzy', 'known'];
 
@@ -20,6 +22,7 @@
     deckBtn: document.getElementById('deckBtn'),
     settingsBtn: document.getElementById('settingsBtn'),
     brandHome: document.getElementById('brandHome'),
+    brandName: document.getElementById('brandName'),
     studyScreen: document.getElementById('studyScreen'),
     doneScreen: document.getElementById('doneScreen'),
     crumbs: document.getElementById('crumbs'),
@@ -43,6 +46,7 @@
     modalTitle: document.getElementById('modalTitle'),
     modalBody: document.getElementById('modalBody'),
     modalFoot: document.getElementById('modalFoot'),
+    modalActions: document.getElementById('modalActions'),
   };
 
   /* ---------------- 运行时状态 ---------------- */
@@ -856,6 +860,14 @@
     if (opts.body) els.modalBody.appendChild(opts.body);
     els.modalFoot.innerHTML = '';
     if (opts.foot) els.modalFoot.appendChild(opts.foot);
+    if (els.modalActions) {
+      var extra = els.modalActions.querySelectorAll('[data-modal-action]');
+      for (var i = 0; i < extra.length; i++) extra[i].remove();
+      if (opts.action) {
+        opts.action.setAttribute('data-modal-action', '1');
+        els.modalActions.insertBefore(opts.action, els.modalActions.firstChild);
+      }
+    }
     els.modal.hidden = false;
     els.body.style.overflow = 'hidden';
     var focusable = els.modal.querySelector('button, input, textarea, select, [tabindex]');
@@ -1558,11 +1570,11 @@
     g4.appendChild(h('p', { class: 'about-author', text: '作者：Anyu' }));
     g4.appendChild(h('p', {
       class: 'about-note',
-      text: 'NounKiller v1.5 · 专注名词解释的背诵工具。三级评级快速自测；不熟悉时逐字点亮回忆，再用间隔重复把「看过」变成「说得出」。'
+      text: 'NounKiller v' + APP_VERSION + ' · 专注名词解释的背诵工具。先凭记忆讲一遍，用三级自评标出不熟；逐字点亮补全解释，再用间隔重复把「看过」练成「说得出」。'
     }));
     g4.appendChild(h('p', {
       class: 'about-note',
-      text: '题库、进度与划线默认只保存在本机；登录后可选择同步到自己的云端空间。'
+      text: '题库、进度与划线默认保存在本机；登录后可同步到自己的云端，也能建群共享题库、邀请同学一起背。'
     }));
     body.appendChild(g4);
 
@@ -1680,6 +1692,23 @@
   });
   if (els.tocBtn) els.tocBtn.addEventListener('click', openToc);
   if (els.prevBtn) els.prevBtn.addEventListener('click', prevCard);
+  // 品牌名始终一行；先让题库选择与图标间距收缩，仍放不下才等比缩小字号
+  function fitBrandName() {
+    var name = els.brandName;
+    if (!name) return;
+    var appbar = name.closest ? name.closest('.appbar') : null;
+    name.style.fontSize = '';
+    var base = parseFloat(getComputedStyle(name).fontSize) || 20;
+    var size = base;
+    var guard = 0;
+    while (appbar && appbar.scrollWidth > appbar.clientWidth + 1 && size > 11 && guard < 40) {
+      size = Math.max(11, size - 0.5);
+      name.style.fontSize = size + 'px';
+      guard += 1;
+      void appbar.scrollWidth;
+    }
+  }
+
   els.brandHome.addEventListener('click', function () {
     if (app.phase === 'done' && app.doneKind === 'summary') return;
     if (app.phase === 'prompt' || app.phase === 'revealed' || app.phase === 'recall') {
@@ -1765,6 +1794,13 @@
   });
 
   function boot() {
+    fitBrandName();
+    var brandFitFrame = null;
+    window.addEventListener('resize', function () {
+      if (brandFitFrame) cancelAnimationFrame(brandFitFrame);
+      brandFitFrame = requestAnimationFrame(fitBrandName);
+    });
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitBrandName);
     applyFontScale();
     store.ensureToday();
     lastDay = C.dateKey();
@@ -1781,6 +1817,20 @@
       applyFontScale();
       startSession();
       return S;
+    },
+    // 群组分享的题库并入同名题库，避免每次导入都多出一个重名题库
+    importDeck: function (name, cards) {
+      var items = (cards || []).filter(function (c) {
+        return c && typeof c.term === 'string' && typeof c.def === 'string' && c.term.trim() && c.def.trim();
+      });
+      if (!items.length) return { deck: null, added: 0 };
+      var wanted = (name || '群组题库').slice(0, 60);
+      var deck = store.state.decks.filter(function (d) {
+        return !d.virtual && d.name === wanted;
+      })[0];
+      if (!deck) deck = store.createDeck(wanted);
+      var added = store.addCards(deck.id, items);
+      return { deck: deck, added: added.length };
     },
     openModal: openModal,
     closeModal: closeModal,

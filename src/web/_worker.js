@@ -142,6 +142,29 @@ async function ensureSchema(env) {
         body TEXT NOT NULL, created_at INTEGER NOT NULL,
         read_by_user INTEGER NOT NULL DEFAULT 0, read_by_admin INTEGER NOT NULL DEFAULT 0)`,
       'CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, created_at)',
+      `CREATE TABLE IF NOT EXISTS chat_groups (
+        id TEXT PRIMARY KEY, group_no TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+        owner_id TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS chat_members (
+        group_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member',
+        joined_at INTEGER NOT NULL, PRIMARY KEY (group_id, user_id))`,
+      `CREATE TABLE IF NOT EXISTS chat_invites (
+        id TEXT PRIMARY KEY, group_id TEXT NOT NULL, inviter_id TEXT NOT NULL, invitee_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, UNIQUE(group_id, invitee_id))`,
+      `CREATE TABLE IF NOT EXISTS chat_join_requests (
+        id TEXT PRIMARY KEY, group_id TEXT NOT NULL, user_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, UNIQUE(group_id, user_id))`,
+      `CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY, group_id TEXT NOT NULL, user_id TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'text',
+        deck_name TEXT NOT NULL DEFAULT '', deck_count INTEGER NOT NULL DEFAULT 0,
+        deck_payload TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS chat_file_hides (
+        user_id TEXT NOT NULL, message_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, message_id))`,
+      'CREATE INDEX IF NOT EXISTS idx_chat_messages_time ON chat_messages(group_id, created_at)',
+      'CREATE INDEX IF NOT EXISTS idx_chat_members_user ON chat_members(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_chat_invites_user ON chat_invites(invitee_id, status)',
     ];
     for (const sql of statements) await env.DB.prepare(sql).run();
     // 老库补列；已存在时会报 duplicate column，忽略即可。
@@ -582,6 +605,413 @@ async function handlePresence(request, env) {
   return json({ ok: true, at: now, unread: await unreadFor(env, user.id) });
 }
 
+
+const GROUP_LIMIT = 120;
+const GROUP_DECK_MAX_BYTES = 300000;
+const GROUP_DECK_MAX_CARDS = 800;
+const GROUP_NAME_MAX = 30;
+
+function groupName(value) {
+  return String(value || '').trim().slice(0, GROUP_NAME_MAX);
+}
+
+function groupView(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    groupNo: row.group_no,
+    ownerId: row.owner_id,
+    role: row.role || 'member',
+    memberCount: Number(row.member_count || 0),
+    createdAt: row.created_at,
+  };
+}
+
+function chatMessageView(row, meId) {
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    userId: row.user_id,
+    name: row.email ? String(row.email).split('@')[0] : '同学',
+    mine: row.user_id === meId,
+    body: row.body || '',
+    kind: row.kind || 'text',
+    deckName: row.deck_name || '',
+    deckCount: Number(row.deck_count || 0),
+    createdAt: row.created_at,
+  };
+}
+
+async function uniqueGroupNo(env) {
+  for (let i = 0; i < 20; i += 1) {
+    const no = String(10000000 + Math.floor(Math.random() * 90000000));
+    const hit = await env.DB.prepare('SELECT 1 FROM chat_groups WHERE group_no = ?').bind(no).first();
+    if (!hit) return no;
+  }
+  need(false, 500, '群号生成失败，请重试');
+}
+
+async function requireGroupMember(env, groupId, userId) {
+  const row = await env.DB.prepare(
+    `SELECT m.role, g.id, g.name, g.group_no, g.owner_id, g.created_at
+     FROM chat_members m JOIN chat_groups g ON g.id = m.group_id
+     WHERE m.group_id = ? AND m.user_id = ?`,
+  ).bind(groupId, userId).first();
+  need(row, 403, '你不在这个群组里');
+  return row;
+}
+
+async function handleGroups(request, env) {
+  const user = await requireUser(request, env);
+  const rows = await env.DB.prepare(
+    `SELECT g.*, m.role,
+       (SELECT COUNT(*) FROM chat_members cm WHERE cm.group_id = g.id) AS member_count
+     FROM chat_groups g JOIN chat_members m ON m.group_id = g.id
+     WHERE m.user_id = ? ORDER BY g.created_at DESC`,
+  ).bind(user.id).all();
+  return json({ groups: (rows.results || []).map(groupView) });
+}
+
+async function handleGroupCreate(request, env) {
+  const user = await requireUser(request, env);
+  const data = await readJson(request);
+  const name = groupName(data.name);
+  need(name, 400, '给群组起个名字');
+  const groupNo = await uniqueGroupNo(env);
+  const id = randomToken(12);
+  const now = Date.now();
+  await env.DB.prepare(
+    'INSERT INTO chat_groups (id, group_no, name, owner_id, created_at) VALUES (?, ?, ?, ?, ?)',
+  ).bind(id, groupNo, name, user.id, now).run();
+  await env.DB.prepare(
+    "INSERT INTO chat_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)",
+  ).bind(id, user.id, now).run();
+  return json({ group: { id, name, groupNo, ownerId: user.id, role: 'owner', memberCount: 1, createdAt: now } });
+}
+
+async function handleGroupInbox(request, env) {
+  const user = await requireUser(request, env);
+  const invites = await env.DB.prepare(
+    `SELECT i.id, i.created_at, g.id AS group_id, g.name, g.group_no, u.email AS inviter_email
+     FROM chat_invites i JOIN chat_groups g ON g.id = i.group_id
+     JOIN users u ON u.id = i.inviter_id
+     WHERE i.invitee_id = ? AND i.status = 'pending' ORDER BY i.created_at DESC`,
+  ).bind(user.id).all();
+  const joins = await env.DB.prepare(
+    `SELECT r.id, r.created_at, g.id AS group_id, g.name, g.group_no, u.email AS user_email
+     FROM chat_join_requests r JOIN chat_groups g ON g.id = r.group_id
+     JOIN users u ON u.id = r.user_id
+     WHERE g.owner_id = ? AND r.status = 'pending' ORDER BY r.created_at DESC`,
+  ).bind(user.id).all();
+  return json({
+    invites: (invites.results || []).map((r) => ({
+      id: r.id, groupId: r.group_id, name: r.name, groupNo: r.group_no,
+      inviter: r.inviter_email ? String(r.inviter_email).split('@')[0] : '成员', createdAt: r.created_at,
+    })),
+    joinRequests: (joins.results || []).map((r) => ({
+      id: r.id, groupId: r.group_id, name: r.name, groupNo: r.group_no,
+      user: r.user_email ? String(r.user_email).split('@')[0] : '同学', createdAt: r.created_at,
+    })),
+  });
+}
+
+async function handleGroupJoin(request, env) {
+  const user = await requireUser(request, env);
+  const data = await readJson(request);
+  const no = String(data.groupNo || '').trim();
+  need(/^\d{8}$/.test(no), 400, '群号应为 8 位数字');
+  const group = await env.DB.prepare('SELECT * FROM chat_groups WHERE group_no = ?').bind(no).first();
+  need(group, 404, '没有找到这个群组');
+  const member = await env.DB.prepare(
+    'SELECT 1 FROM chat_members WHERE group_id = ? AND user_id = ?',
+  ).bind(group.id, user.id).first();
+  if (member) return json({ ok: true, already: true, groupId: group.id });
+  const pending = await env.DB.prepare(
+    "SELECT 1 FROM chat_join_requests WHERE group_id = ? AND user_id = ? AND status = 'pending'",
+  ).bind(group.id, user.id).first();
+  if (!pending) {
+    await env.DB.prepare(
+      `INSERT INTO chat_join_requests (id, group_id, user_id, status, created_at)
+       VALUES (?, ?, ?, 'pending', ?)
+       ON CONFLICT(group_id, user_id) DO UPDATE SET status='pending', created_at=excluded.created_at`,
+    ).bind(randomToken(12), group.id, user.id, Date.now()).run();
+  }
+  return json({ ok: true, pending: true, groupId: group.id });
+}
+
+async function handleGroupInvite(request, env) {
+  const user = await requireUser(request, env);
+  const data = await readJson(request);
+  const groupId = String(data.groupId || '');
+  const email = normalizeEmail(data.email);
+  need(groupId && email, 400, '填写要邀请的邮箱');
+  await requireGroupMember(env, groupId, user.id);
+  const target = await env.DB.prepare('SELECT id, deleted_at FROM users WHERE email = ?').bind(email).first();
+  need(target && !target.deleted_at, 404, '这个邮箱还没有注册 NounKiller');
+  const member = await env.DB.prepare(
+    'SELECT 1 FROM chat_members WHERE group_id = ? AND user_id = ?',
+  ).bind(groupId, target.id).first();
+  need(!member, 409, '对方已经在群里了');
+  await env.DB.prepare(
+    `INSERT INTO chat_invites (id, group_id, inviter_id, invitee_id, status, created_at)
+     VALUES (?, ?, ?, ?, 'pending', ?)
+     ON CONFLICT(group_id, invitee_id) DO UPDATE SET status='pending', created_at=excluded.created_at, inviter_id=excluded.inviter_id`,
+  ).bind(randomToken(12), groupId, user.id, target.id, Date.now()).run();
+  return json({ ok: true });
+}
+
+async function handleGroupInviteRespond(request, env) {
+  const user = await requireUser(request, env);
+  const data = await readJson(request);
+  const inviteId = String(data.inviteId || '');
+  need(inviteId, 400, '缺少邀请');
+  const accept = data.accept === true;
+  const row = await env.DB.prepare(
+    "SELECT * FROM chat_invites WHERE id = ? AND invitee_id = ? AND status = 'pending'",
+  ).bind(inviteId, user.id).first();
+  need(row, 404, '邀请已失效');
+  if (accept) {
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO chat_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
+    ).bind(row.group_id, user.id, Date.now()).run();
+  }
+  await env.DB.prepare("UPDATE chat_invites SET status = ? WHERE id = ?")
+    .bind(accept ? 'accepted' : 'rejected', inviteId).run();
+  return json({ ok: true, accepted: accept, groupId: row.group_id });
+}
+
+async function handleGroupJoinRespond(request, env) {
+  const user = await requireUser(request, env);
+  const data = await readJson(request);
+  const requestId = String(data.requestId || '');
+  need(requestId, 400, '缺少申请');
+  const accept = data.accept === true;
+  const row = await env.DB.prepare(
+    `SELECT r.*, g.owner_id FROM chat_join_requests r JOIN chat_groups g ON g.id = r.group_id
+     WHERE r.id = ? AND r.status = 'pending'`,
+  ).bind(requestId).first();
+  need(row, 404, '申请已失效');
+  need(row.owner_id === user.id, 403, '只有群主可以审批');
+  if (accept) {
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO chat_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
+    ).bind(row.group_id, row.user_id, Date.now()).run();
+  }
+  await env.DB.prepare("UPDATE chat_join_requests SET status = ? WHERE id = ?")
+    .bind(accept ? 'accepted' : 'rejected', requestId).run();
+  return json({ ok: true, accepted: accept });
+}
+
+async function handleGroupSettings(request, env) {
+  const user = await requireUser(request, env);
+  const groupId = new URL(request.url).searchParams.get('groupId') || '';
+  need(groupId, 400, '缺少群组');
+  const row = await requireGroupMember(env, groupId, user.id);
+  const isOwner = row.owner_id === user.id;
+  const members = await env.DB.prepare(
+    `SELECT m.user_id, m.role, m.joined_at, u.email FROM chat_members m JOIN users u ON u.id = m.user_id
+     WHERE m.group_id = ? ORDER BY m.joined_at ASC`,
+  ).bind(groupId).all();
+  const files = await env.DB.prepare(
+    `SELECT m.id, m.deck_name, m.deck_count, m.created_at, m.user_id, u.email
+     FROM chat_messages m LEFT JOIN users u ON u.id = m.user_id
+     WHERE m.group_id = ? AND m.kind = 'deck'
+       AND m.id NOT IN (SELECT message_id FROM chat_file_hides WHERE user_id = ?)
+     ORDER BY m.created_at DESC LIMIT 80`,
+  ).bind(groupId, user.id).all();
+  const memberCount = members.results ? members.results.length : 1;
+  let joinRequests = [];
+  if (isOwner) {
+    const pending = await env.DB.prepare(
+      `SELECT r.id, r.created_at, u.email FROM chat_join_requests r JOIN users u ON u.id = r.user_id
+       WHERE r.group_id = ? AND r.status = 'pending' ORDER BY r.created_at ASC`,
+    ).bind(groupId).all();
+    joinRequests = (pending.results || []).map((r) => ({
+      id: r.id, email: r.email, name: String(r.email || '').split('@')[0], createdAt: r.created_at,
+    }));
+  }
+  return json({
+    group: {
+      id: row.id, name: row.name, groupNo: row.group_no, ownerId: row.owner_id,
+      role: row.role, memberCount, createdAt: row.created_at,
+    },
+    isOwner,
+    members: (members.results || []).map((m) => ({
+      userId: m.user_id, email: m.email, name: String(m.email || '').split('@')[0],
+      role: m.role, joinedAt: m.joined_at, me: m.user_id === user.id, owner: m.user_id === row.owner_id,
+    })),
+    joinRequests,
+    files: (files.results || []).map((f) => ({
+      id: f.id, deckName: f.deck_name, deckCount: f.deck_count, createdAt: f.created_at,
+      name: f.email ? String(f.email).split('@')[0] : '同学',
+      mine: f.user_id === user.id,
+    })),
+  });
+}
+
+async function handleGroupRename(request, env) {
+  const user = await requireUser(request, env);
+  const data = await readJson(request);
+  const groupId = String(data.groupId || '');
+  need(groupId, 400, '缺少群组');
+  const row = await requireGroupMember(env, groupId, user.id);
+  need(row.owner_id === user.id, 403, '只有群主可以修改群名');
+  const name = groupName(data.name);
+  need(name, 400, '群名不能为空');
+  await env.DB.prepare('UPDATE chat_groups SET name = ? WHERE id = ?').bind(name, groupId).run();
+  return json({ ok: true, name });
+}
+
+async function handleGroupLeave(request, env) {
+  const user = await requireUser(request, env);
+  const data = await readJson(request);
+  const groupId = String(data.groupId || '');
+  need(groupId, 400, '缺少群组');
+  const row = await requireGroupMember(env, groupId, user.id);
+  if (row.owner_id === user.id) {
+    const next = await env.DB.prepare(
+      "SELECT user_id FROM chat_members WHERE group_id = ? AND user_id <> ? ORDER BY joined_at ASC LIMIT 1",
+    ).bind(groupId, user.id).first();
+    if (!next) {
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM chat_messages WHERE group_id = ?').bind(groupId),
+        env.DB.prepare('DELETE FROM chat_invites WHERE group_id = ?').bind(groupId),
+        env.DB.prepare('DELETE FROM chat_join_requests WHERE group_id = ?').bind(groupId),
+        env.DB.prepare('DELETE FROM chat_members WHERE group_id = ?').bind(groupId),
+        env.DB.prepare('DELETE FROM chat_groups WHERE id = ?').bind(groupId),
+      ]);
+      return json({ ok: true, deleted: true });
+    }
+    await env.DB.prepare("UPDATE chat_groups SET owner_id = ? WHERE id = ?").bind(next.user_id, groupId).run();
+    await env.DB.prepare("UPDATE chat_members SET role = 'owner' WHERE group_id = ? AND user_id = ?")
+      .bind(groupId, next.user_id).run();
+  }
+  await env.DB.prepare('DELETE FROM chat_members WHERE group_id = ? AND user_id = ?')
+    .bind(groupId, user.id).run();
+  return json({ ok: true, left: true });
+}
+
+async function handleGroupKick(request, env) {
+  const user = await requireUser(request, env);
+  const data = await readJson(request);
+  const groupId = String(data.groupId || '');
+  need(groupId, 400, '缺少群组');
+  const row = await requireGroupMember(env, groupId, user.id);
+  need(row.owner_id === user.id, 403, '只有群主可以移除成员');
+  const target = String(data.userId || '');
+  need(target && target !== user.id, 400, '不能移除自己');
+  await env.DB.prepare('DELETE FROM chat_members WHERE group_id = ? AND user_id = ?')
+    .bind(groupId, target).run();
+  return json({ ok: true });
+}
+
+async function groupDeckPayload(raw) {
+  const deck = raw && typeof raw === 'object' ? raw : null;
+  need(deck, 400, '题库内容为空');
+  const name = String(deck.name || '').trim().slice(0, 80) || '群组题库';
+  const cards = [];
+  const items = Array.isArray(deck.cards) ? deck.cards : [];
+  for (const item of items) {
+    if (!item) continue;
+    const term = String(item.term || '').trim();
+    const def = String(item.def || '').trim();
+    if (!term || !def) continue;
+    cards.push({ term, def });
+    if (cards.length >= GROUP_DECK_MAX_CARDS) break;
+  }
+  need(cards.length, 400, '题库里没有可分享的词条');
+  const payload = JSON.stringify({ name, cards });
+  need(new TextEncoder().encode(payload).length <= GROUP_DECK_MAX_BYTES, 413, '题库太大，无法分享');
+  return { name, cards, payload };
+}
+
+async function handleGroupMessages(request, env) {
+  const user = await requireUser(request, env);
+  if (request.method === 'GET') {
+    const groupId = new URL(request.url).searchParams.get('groupId') || '';
+    need(groupId, 400, '缺少群组');
+    await requireGroupMember(env, groupId, user.id);
+    const rows = await env.DB.prepare(
+      `SELECT m.*, u.email FROM chat_messages m LEFT JOIN users u ON u.id = m.user_id
+       WHERE m.group_id = ? ORDER BY m.created_at DESC LIMIT ?`,
+    ).bind(groupId, GROUP_LIMIT).all();
+    return json({ messages: (rows.results || []).map((r) => chatMessageView(r, user.id)).reverse() });
+  }
+  const data = await readJson(request);
+  const groupId = String(data.groupId || '');
+  need(groupId, 400, '缺少群组');
+  await requireGroupMember(env, groupId, user.id);
+  const text = String(data.body || '').trim().slice(0, MAX_MESSAGE);
+  let kind = 'text';
+  let deckName = '';
+  let deckCount = 0;
+  let deckPayload = '';
+  if (data.deck) {
+    const share = await groupDeckPayload(data.deck);
+    kind = 'deck'; deckName = share.name; deckCount = share.cards.length; deckPayload = share.payload;
+  }
+  need(text || kind === 'deck', 400, '写点什么，或选一个题库');
+  await env.DB.prepare(
+    `INSERT INTO chat_messages (id, group_id, user_id, body, kind, deck_name, deck_count, deck_payload, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(randomToken(12), groupId, user.id, text, kind, deckName, deckCount, deckPayload, Date.now()).run();
+  return json({ ok: true });
+}
+
+async function loadGroupDeck(env, messageId, userId) {
+  need(messageId, 400, '缺少消息');
+  const row = await env.DB.prepare(
+    "SELECT group_id, deck_name, deck_payload FROM chat_messages WHERE id = ? AND kind = 'deck'",
+  ).bind(messageId).first();
+  need(row, 404, '这条群组消息里没有题库');
+  await requireGroupMember(env, row.group_id, userId);
+  let deck = null;
+  try { deck = JSON.parse(row.deck_payload); } catch { deck = null; }
+  need(deck && Array.isArray(deck.cards) && deck.cards.length, 404, '题库内容已损坏');
+  return { deckName: row.deck_name || deck.name || '群组题库', cards: deck.cards };
+}
+
+async function handleGroupImport(request, env) {
+  const user = await requireUser(request, env);
+  const body = await readJson(request);
+  return json(await loadGroupDeck(env, String(body.messageId || ''), user.id));
+}
+
+async function groupDeckMessageId(request, env) {
+  const user = await requireUser(request, env);
+  const data = await readJson(request);
+  const messageId = String(data.messageId || '');
+  need(messageId, 400, '缺少题库');
+  const row = await env.DB.prepare(
+    "SELECT group_id FROM chat_messages WHERE id = ? AND kind = 'deck'",
+  ).bind(messageId).first();
+  need(row, 404, '这条群组消息里没有题库');
+  const member = await requireGroupMember(env, row.group_id, user.id);
+  return { user, messageId, groupId: row.group_id, member };
+}
+
+async function handleGroupFileDelete(request, env) {
+  const { user, messageId, member } = await groupDeckMessageId(request, env);
+  need(member.owner_id === user.id, 403, '只有群主可以删除群文件');
+  await env.DB.prepare('DELETE FROM chat_messages WHERE id = ?').bind(messageId).run();
+  await env.DB.prepare('DELETE FROM chat_file_hides WHERE message_id = ?').bind(messageId).run();
+  return json({ ok: true });
+}
+
+async function handleGroupFileIgnore(request, env) {
+  const { user, messageId } = await groupDeckMessageId(request, env);
+  await env.DB.prepare(
+    'INSERT OR IGNORE INTO chat_file_hides (user_id, message_id, created_at) VALUES (?, ?, ?)',
+  ).bind(user.id, messageId, Date.now()).run();
+  return json({ ok: true });
+}
+
+async function handleGroupPreview(request, env) {
+  const user = await requireUser(request, env);
+  const messageId = new URL(request.url).searchParams.get('messageId') || '';
+  return json(await loadGroupDeck(env, messageId, user.id));
+}
+
 async function handleUserMessages(request, env) {
   const user = await requireUser(request, env);
   if (request.method === 'GET') {
@@ -744,6 +1174,24 @@ async function route(request, env, ctx) {
   if (path === '/api/messages' && (request.method === 'GET' || request.method === 'POST')) {
     return handleUserMessages(request, env);
   }
+  if (path === '/api/group/list' && request.method === 'GET') return handleGroups(request, env);
+  if (path === '/api/group/create' && request.method === 'POST') return handleGroupCreate(request, env);
+  if (path === '/api/group/inbox' && request.method === 'GET') return handleGroupInbox(request, env);
+  if (path === '/api/group/join' && request.method === 'POST') return handleGroupJoin(request, env);
+  if (path === '/api/group/invite' && request.method === 'POST') return handleGroupInvite(request, env);
+  if (path === '/api/group/invite/respond' && request.method === 'POST') return handleGroupInviteRespond(request, env);
+  if (path === '/api/group/request/respond' && request.method === 'POST') return handleGroupJoinRespond(request, env);
+  if (path === '/api/group/settings' && request.method === 'GET') return handleGroupSettings(request, env);
+  if (path === '/api/group/rename' && request.method === 'POST') return handleGroupRename(request, env);
+  if (path === '/api/group/leave' && request.method === 'POST') return handleGroupLeave(request, env);
+  if (path === '/api/group/kick' && request.method === 'POST') return handleGroupKick(request, env);
+  if (path === '/api/group/messages' && (request.method === 'GET' || request.method === 'POST')) {
+    return handleGroupMessages(request, env);
+  }
+  if (path === '/api/group/import' && request.method === 'POST') return handleGroupImport(request, env);
+  if (path === '/api/group/file/delete' && request.method === 'POST') return handleGroupFileDelete(request, env);
+  if (path === '/api/group/file/ignore' && request.method === 'POST') return handleGroupFileIgnore(request, env);
+  if (path === '/api/group/deck' && request.method === 'GET') return handleGroupPreview(request, env);
   if (path === '/api/admin/users' && request.method === 'GET') return handleAdminUsers(request, env);
   if (path === '/api/admin/users/delete' && request.method === 'POST') return handleAdminDelete(request, env);
   if (path === '/api/admin/messages' && (request.method === 'GET' || request.method === 'POST')) {

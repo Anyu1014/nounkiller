@@ -27,8 +27,8 @@ targets:
       properties:
         CFBundleDisplayName: NounKiller
         CFBundleName: NounKiller
-        CFBundleShortVersionString: "1.7.0"
-        CFBundleVersion: "9"
+        CFBundleShortVersionString: "2.0.0"
+        CFBundleVersion: "10"
         CFBundleDevelopmentRegion: zh_CN
         UILaunchScreen:
           UIColorName: LaunchBackground

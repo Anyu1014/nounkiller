@@ -31,6 +31,7 @@
   var threadUser = null;
   var syncPaused = false;
   var modalTimers = [];
+  var groupPollTimer = null;
 
   function trackModalTimer(id) { modalTimers.push(id); return id; }
 
@@ -686,6 +687,707 @@
     return { wrap: wrap, focus: function () { input.focus(); } };
   }
 
+
+  function stopGroupPoll() {
+    if (groupPollTimer) { clearInterval(groupPollTimer); groupPollTimer = null; }
+  }
+
+  function openGroup() {
+    if (!session) return openAuth('login');
+    stopGroupPoll();
+    var body = h('div', { class: 'group-panel' });
+    var head = h('div', { class: 'group-list-head' });
+    head.appendChild(h('div', { class: 'group-list-title', text: '我的群组' }));
+    var inboxBtn = h('button', {
+      class: 'ghost-btn group-inbox-btn', type: 'button', text: '消息',
+      onclick: openGroupInbox
+    });
+    head.appendChild(inboxBtn);
+    body.appendChild(head);
+
+    var list = h('div', { class: 'group-list' });
+    body.appendChild(list);
+
+    function render(groups) {
+      list.innerHTML = '';
+      if (!groups.length) {
+        list.appendChild(h('p', {
+          class: 'group-empty',
+          text: '还没有加入群组。创建自己的群，或输入 8 位群号申请加入。'
+        }));
+        return;
+      }
+      groups.forEach(function (g) {
+        var row = h('button', {
+          class: 'group-item', type: 'button',
+          onclick: function () { openGroupChat(g); }
+        });
+        row.appendChild(h('span', { class: 'group-item-mark', text: '题' }));
+        var main = h('span', { class: 'group-item-main' });
+        var title = h('span', { class: 'group-item-name', text: g.name });
+        if (g.role === 'owner') title.appendChild(h('em', { class: 'group-tag', text: '群主' }));
+        main.appendChild(title);
+        main.appendChild(h('span', {
+          class: 'group-item-meta',
+          text: '群号 ' + g.groupNo + ' · ' + (g.memberCount || 1) + ' 人'
+        }));
+        row.appendChild(main);
+        list.appendChild(row);
+      });
+    }
+
+    function load() {
+      return api('/api/group/list').then(function (data) {
+        render(data.groups || []);
+      }).catch(function (err) {
+        list.innerHTML = '';
+        list.appendChild(h('p', { class: 'group-empty', text: errText(err) }));
+      }).then(function () {
+        api('/api/group/inbox').then(function (data) {
+          var n = (data.invites || []).length + (data.joinRequests || []).length;
+          inboxBtn.textContent = n ? '消息（' + n + '）' : '消息';
+          inboxBtn.classList.toggle('has-badge', n > 0);
+        }).catch(function () { /* 消息数只是提示 */ });
+      });
+    }
+
+    var foot = document.createDocumentFragment();
+    foot.appendChild(h('button', {
+      class: 'ghost-btn', type: 'button', text: '创建群组', onclick: openGroupCreate
+    }));
+    foot.appendChild(h('button', {
+      class: 'ghost-btn', type: 'button', text: '加入群组', onclick: openGroupJoin
+    }));
+    foot.appendChild(h('button', {
+      class: 'primary-btn', type: 'button', text: '关闭', onclick: A.closeModal
+    }));
+
+    A.openModal({ kicker: 'GROUP', title: '群组题库', body: body, foot: foot, autofocus: false });
+    load();
+  }
+
+  function openGroupCreate() {
+    if (!session) return openAuth('login');
+    stopGroupPoll();
+    var body = h('div', { class: 'group-form' });
+    body.appendChild(h('p', { class: 'group-note', text: '你会成为群主。群号由系统随机生成，共 8 位数字。' }));
+    var input = h('input', {
+      class: 'text-input', type: 'text', maxlength: '30',
+      placeholder: '例如：传播学名词解释', 'aria-label': '群名'
+    });
+    body.appendChild(input);
+    var error = h('p', { class: 'account-error', hidden: true });
+    body.appendChild(error);
+    var btn = h('button', { class: 'primary-btn', type: 'button', text: '创建' });
+
+    function submit() {
+      var name = input.value.trim();
+      if (!name) return A.toast('给群组起个名字');
+      btn.disabled = true;
+      btn.textContent = '创建中…';
+      api('/api/group/create', { method: 'POST', body: { name: name } }).then(function (data) {
+        A.toast('群组已创建，群号 ' + data.group.groupNo);
+        openGroup();
+      }).catch(function (err) {
+        error.textContent = errText(err);
+        error.hidden = false;
+        btn.disabled = false;
+        btn.textContent = '创建';
+      });
+    }
+    btn.addEventListener('click', submit);
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+
+    var foot = document.createDocumentFragment();
+    foot.appendChild(h('button', { class: 'ghost-btn', type: 'button', text: '返回', onclick: openGroup }));
+    foot.appendChild(btn);
+    A.openModal({ kicker: 'GROUP', title: '创建群组', body: body, foot: foot });
+    setTimeout(function () { input.focus(); }, 60);
+  }
+
+  function openGroupJoin() {
+    if (!session) return openAuth('login');
+    stopGroupPoll();
+    var body = h('div', { class: 'group-form' });
+    body.appendChild(h('p', { class: 'group-note', text: '输入群主分享的 8 位群号，申请加入后等待群主通过。' }));
+    var input = h('input', {
+      class: 'text-input', type: 'text', inputmode: 'numeric', maxlength: '8',
+      placeholder: '8 位群号', 'aria-label': '群号'
+    });
+    body.appendChild(input);
+    var error = h('p', { class: 'account-error', hidden: true });
+    body.appendChild(error);
+    var btn = h('button', { class: 'primary-btn', type: 'button', text: '申请加入' });
+
+    function submit() {
+      var no = input.value.replace(/\s+/g, '');
+      if (!/^\d{8}$/.test(no)) {
+        error.textContent = '群号应为 8 位数字';
+        error.hidden = false;
+        input.focus();
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = '提交中…';
+      api('/api/group/join', { method: 'POST', body: { groupNo: no } }).then(function (data) {
+        if (data.already) A.toast('你已经在这个群里了');
+        else A.toast('申请已提交，等待群主通过');
+        openGroup();
+      }).catch(function (err) {
+        error.textContent = errText(err);
+        error.hidden = false;
+        btn.disabled = false;
+        btn.textContent = '申请加入';
+      });
+    }
+    btn.addEventListener('click', submit);
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+
+    var foot = document.createDocumentFragment();
+    foot.appendChild(h('button', { class: 'ghost-btn', type: 'button', text: '返回', onclick: openGroup }));
+    foot.appendChild(btn);
+    A.openModal({ kicker: 'GROUP', title: '加入群组', body: body, foot: foot });
+    setTimeout(function () { input.focus(); }, 60);
+  }
+
+  function openGroupInbox() {
+    if (!session) return openAuth('login');
+    stopGroupPoll();
+    var body = h('div', { class: 'group-inbox' });
+    var list = h('div', { class: 'group-inbox-list' });
+    body.appendChild(list);
+
+    function respond(path, payload, message) {
+      return api(path, { method: 'POST', body: payload }).then(function () {
+        A.toast(message);
+        return load();
+      }).catch(function (err) { A.toast(errText(err)); });
+    }
+
+    function decisionButtons(onAccept, onReject) {
+      var wrap = h('div', { class: 'group-row-actions' });
+      wrap.appendChild(h('button', {
+        class: 'ghost-btn danger-text', type: 'button', text: '拒绝', onclick: onReject
+      }));
+      wrap.appendChild(h('button', {
+        class: 'ghost-btn', type: 'button', text: '接受', onclick: onAccept
+      }));
+      return wrap;
+    }
+
+    function render(data) {
+      list.innerHTML = '';
+      var invites = data.invites || [];
+      var joins = data.joinRequests || [];
+      if (!invites.length && !joins.length) {
+        list.appendChild(h('p', { class: 'group-empty', text: '没有待处理的消息。' }));
+        return;
+      }
+      if (invites.length) {
+        list.appendChild(h('div', { class: 'group-section-label', text: '邀请我加入' }));
+        invites.forEach(function (item) {
+          var row = h('div', { class: 'group-row' });
+          var main = h('div', { class: 'group-row-main' });
+          main.appendChild(h('div', { class: 'group-row-title', text: item.name }));
+          main.appendChild(h('div', {
+            class: 'group-row-meta',
+            text: '群号 ' + item.groupNo + ' · 邀请人 ' + item.inviter
+          }));
+          row.appendChild(main);
+          row.appendChild(decisionButtons(
+            function () { respond('/api/group/invite/respond', { inviteId: item.id, accept: true }, '已加入群组'); },
+            function () { respond('/api/group/invite/respond', { inviteId: item.id, accept: false }, '已拒绝邀请'); }
+          ));
+          list.appendChild(row);
+        });
+      }
+      if (joins.length) {
+        list.appendChild(h('div', { class: 'group-section-label', text: '入群申请（我管理的群）' }));
+        joins.forEach(function (item) {
+          var row = h('div', { class: 'group-row' });
+          var main = h('div', { class: 'group-row-main' });
+          main.appendChild(h('div', { class: 'group-row-title', text: item.name }));
+          main.appendChild(h('div', {
+            class: 'group-row-meta',
+            text: '群号 ' + item.groupNo + ' · 申请人 ' + item.user
+          }));
+          row.appendChild(main);
+          row.appendChild(decisionButtons(
+            function () { respond('/api/group/request/respond', { requestId: item.id, accept: true }, '已同意入群'); },
+            function () { respond('/api/group/request/respond', { requestId: item.id, accept: false }, '已拒绝申请'); }
+          ));
+          list.appendChild(row);
+        });
+      }
+    }
+
+    function load() {
+      return api('/api/group/inbox').then(function (data) {
+        render(data);
+      }).catch(function (err) {
+        list.innerHTML = '';
+        list.appendChild(h('p', { class: 'group-empty', text: errText(err) }));
+      });
+    }
+
+    var foot = document.createDocumentFragment();
+    foot.appendChild(h('button', { class: 'ghost-btn', type: 'button', text: '返回群组列表', onclick: openGroup }));
+    foot.appendChild(h('button', { class: 'primary-btn', type: 'button', text: '关闭', onclick: A.closeModal }));
+
+    A.openModal({ kicker: 'GROUP', title: '群组消息', body: body, foot: foot, autofocus: false });
+    load();
+  }
+
+  function openGroupChat(group) {
+    if (!session) return openAuth('login');
+    stopGroupPoll();
+    var body = h('div', { class: 'thread-panel group-panel group-chat' });
+
+    var head = h('div', { class: 'group-chat-head' });
+    var info = h('div', { class: 'group-chat-info' });
+    info.appendChild(h('div', { class: 'group-chat-name', text: group.name }));
+    info.appendChild(h('div', {
+      class: 'group-row-meta',
+      text: '群号 ' + group.groupNo + ' · ' + (group.memberCount || 1) + ' 人'
+    }));
+    head.appendChild(info);
+    body.appendChild(head);
+
+    var list = h('div', { class: 'thread-list' });
+    body.appendChild(list);
+    var previewing = false;
+
+    function goBack() {
+      if (previewing) {
+        previewing = false;
+        load();
+        resumePoll();
+        return;
+      }
+      stopGroupPoll();
+      openGroup();
+    }
+
+    var sel = h('select', { class: 'group-attach-select', 'aria-label': '附带题库', title: '附带题库' });
+    sel.appendChild(h('option', { value: '', text: '只发文字' }));
+    ((A.store && A.store.state && A.store.state.decks) || []).forEach(function (deck) {
+      sel.appendChild(h('option', { value: deck.id, text: deck.name }));
+    });
+    var attach = h('label', { class: 'group-attach' });
+    attach.appendChild(h('span', {
+      class: 'group-attach-icon',
+      html: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.8 7.2 7.1 13.9a2.2 2.2 0 0 1-3.1-3.1l6.4-6.4a3.3 3.3 0 0 1 4.7 4.7l-6.2 6.2a1.6 1.6 0 0 1-2.3-2.3l5.6-5.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    }));
+    attach.appendChild(sel);
+
+    var chip = h('div', { class: 'group-attach-chip', hidden: true });
+    function syncAttach() {
+      chip.innerHTML = '';
+      var deck = sel.value ? A.store.deckById(sel.value) : null;
+      if (!deck) {
+        chip.hidden = true;
+        attach.classList.remove('on');
+        return;
+      }
+      chip.hidden = false;
+      attach.classList.add('on');
+      chip.appendChild(h('span', { text: '附带：' + deck.name }));
+      chip.appendChild(h('button', {
+        class: 'group-attach-clear', type: 'button', text: '✕',
+        'aria-label': '取消附带题库',
+        onclick: function () { sel.value = ''; syncAttach(); }
+      }));
+    }
+    sel.addEventListener('change', syncAttach);
+
+    var input = h('textarea', { placeholder: '在群里说点什么…', 'aria-label': '群组消息' });
+    var send = h('button', {
+      class: 'primary-btn group-send-btn', type: 'button', 'aria-label': '发送', title: '发送',
+      html: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.4 10.2 17 4l-4.7 12.1-2.5-4.8-6.4-1.1Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M9.8 11.3 17 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
+    });
+    var row = h('div', { class: 'thread-composer group-composer' });
+    row.appendChild(attach);
+    row.appendChild(input);
+    row.appendChild(send);
+    body.appendChild(chip);
+    body.appendChild(row);
+
+    function importDeckMessage(msg) {
+      api('/api/group/import', { method: 'POST', body: { messageId: msg.id } }).then(function (data) {
+        var res = A.importDeck(data.deckName, data.cards);
+        if (!res || !res.added) return A.toast('题库里没有新词条');
+        A.toast('已获取 ' + res.added + ' 条到「' + res.deck.name + '」');
+      }).catch(function (err) {
+        A.toast(errText(err));
+      }).then(function () {
+        openGroupChat(group);
+      });
+    }
+
+    function confirmImport(msg) {
+      A.askConfirm('GROUP', '获取题库',
+        '把「' + (msg.deckName || '题库') + '」的 ' + (msg.deckCount || 0) + ' 条词条存进我的题库？',
+        '获取',
+        function () { importDeckMessage(msg); },
+        function () { openGroupChat(group); });
+    }
+
+    function resumePoll() {
+      stopGroupPoll();
+      groupPollTimer = trackModalTimer(setInterval(load, 7000));
+    }
+
+    function previewMessage(msg) {
+      stopGroupPoll();
+      api('/api/group/deck?messageId=' + encodeURIComponent(msg.id)).then(function (data) {
+        renderPreview(msg, data);
+      }).catch(function (err) {
+        A.toast(errText(err));
+        load();
+        resumePoll();
+      });
+    }
+
+    function renderPreview(msg, data) {
+      previewing = true;
+      list.innerHTML = '';
+      var head = h('div', { class: 'deck-preview-head' });
+      head.appendChild(h('div', { class: 'deck-preview-title', text: data.deckName || msg.deckName || '题库' }));
+      head.appendChild(h('span', { class: 'group-row-meta', text: data.cards.length + ' 条词条' }));
+      list.appendChild(head);
+      data.cards.forEach(function (card) {
+        var item = h('div', { class: 'deck-preview-card' });
+        item.appendChild(h('div', { class: 'deck-preview-term', text: card.term }));
+        item.appendChild(h('div', { class: 'deck-preview-def', text: card.def }));
+        list.appendChild(item);
+      });
+      list.scrollTop = 0;
+    }
+
+    function bubble(msg) {
+      var mine = msg.mine === true;
+      var wrap = h('div', { class: 'msg-row ' + (mine ? 'from-user' : 'from-admin') });
+      var content = h('div', { class: 'msg-bubble' });
+      content.appendChild(h('div', { class: 'msg-who', text: mine ? '我' : (msg.name || '同学') }));
+      if (msg.body) content.appendChild(h('div', { class: 'msg-body', text: msg.body }));
+      if (msg.kind === 'deck') {
+        var card = h('div', { class: 'msg-deck' });
+        card.appendChild(h('div', { class: 'msg-deck-name', text: msg.deckName || '题库' }));
+        card.appendChild(h('div', { class: 'msg-deck-meta', text: (msg.deckCount || 0) + ' 条词条' }));
+        var actions = h('div', { class: 'msg-deck-actions' });
+        var prev = h('button', { class: 'msg-deck-btn', type: 'button', text: '预览' });
+        prev.addEventListener('click', function () { previewMessage(msg); });
+        var imp = h('button', { class: 'msg-deck-btn', type: 'button', text: '获取' });
+        imp.addEventListener('click', function () { confirmImport(msg); });
+        actions.appendChild(prev);
+        actions.appendChild(imp);
+        card.appendChild(actions);
+        content.appendChild(card);
+      }
+      content.appendChild(h('div', { class: 'msg-time', text: fmtTime(msg.createdAt) }));
+      wrap.appendChild(content);
+      return wrap;
+    }
+
+    function render(messages) {
+      list.innerHTML = '';
+      if (!messages.length) {
+        list.appendChild(h('p', {
+          class: 'thread-empty',
+          text: '群组还很安静。发一句话，或把自己的题库分享出来。'
+        }));
+        return;
+      }
+      messages.forEach(function (m) { list.appendChild(bubble(m)); });
+      list.scrollTop = list.scrollHeight;
+    }
+
+    function load() {
+      return api('/api/group/messages?groupId=' + encodeURIComponent(group.id)).then(function (data) {
+        render(data.messages || []);
+      }).catch(function (err) {
+        list.innerHTML = '';
+        list.appendChild(h('p', { class: 'thread-empty', text: errText(err) }));
+      });
+    }
+
+    function submit() {
+      var text = input.value.trim();
+      var deckId = sel.value;
+      if (!text && !deckId) return A.toast('写点什么，或选一个题库');
+      var payload = { groupId: group.id, body: text };
+      if (deckId) {
+        var deck = A.store.deckById(deckId);
+        var cards = A.store.deckCards(deckId).map(function (c) {
+          return { term: c.term, def: c.def };
+        });
+        if (!cards.length) return A.toast('这个题库还没有词条');
+        payload.deck = { name: deck ? deck.name : '群组题库', cards: cards };
+      }
+      send.disabled = true;
+      api('/api/group/messages', { method: 'POST', body: payload }).then(function () {
+        input.value = '';
+        sel.value = '';
+        syncAttach();
+        previewing = false;
+        return load().then(resumePoll);
+      }).catch(function (err) {
+        A.toast(errText(err));
+      }).then(function () {
+        send.disabled = false;
+      });
+    }
+    send.addEventListener('click', submit);
+    input.addEventListener('keydown', function (e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submit();
+    });
+
+    load();
+    resumePoll();
+
+    var foot = document.createDocumentFragment();
+    foot.appendChild(h('span', { class: 'foot-left', text: '群里任何人都能导入你分享的题库' }));
+    foot.appendChild(h('button', {
+      class: 'primary-btn', type: 'button', text: '返回',
+      onclick: goBack
+    }));
+
+    var settingsBtn = h('button', {
+      class: 'icon-btn', type: 'button', 'aria-label': '群设置', title: '群设置',
+      html: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6.5h4.2M11.8 6.5H17M3 13.5h8.2M15.8 13.5H17" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="9.5" cy="6.5" r="2.1" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="13.5" cy="13.5" r="2.1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
+      onclick: function () { openGroupSettings(group); }
+    });
+    A.openModal({
+      kicker: 'GROUP', title: '群聊', body: body, foot: foot,
+      action: settingsBtn, autofocus: false
+    });
+    setTimeout(function () { input.focus(); }, 60);
+  }
+
+  function openGroupSettings(group) {
+    if (!session) return openAuth('login');
+    stopGroupPoll();
+    var body = h('div', { class: 'group-settings' });
+    var panel = h('div', { class: 'group-settings-body' });
+    body.appendChild(panel);
+
+    function act(path, payload, message) {
+      return api(path, { method: 'POST', body: payload }).then(function () {
+        A.toast(message);
+        return load();
+      }).catch(function (err) { A.toast(errText(err)); });
+    }
+
+    function render(data) {
+      var g = data.group;
+      var isOwner = data.isOwner === true;
+      panel.innerHTML = '';
+
+      panel.appendChild(h('div', { class: 'group-settings-name', text: g.name }));
+      panel.appendChild(h('div', {
+        class: 'group-row-meta',
+        text: '群号 ' + g.groupNo + ' · ' + (g.memberCount || data.members.length) + ' 人'
+      }));
+
+      if (isOwner) {
+        var renameRow = h('div', { class: 'group-inline-form' });
+        var nameInput = h('input', {
+          class: 'text-input', type: 'text', maxlength: '30',
+          value: g.name, 'aria-label': '群名'
+        });
+        var saveName = h('button', { class: 'ghost-btn', type: 'button', text: '修改群名' });
+        saveName.addEventListener('click', function () {
+          var name = nameInput.value.trim();
+          if (!name) return A.toast('群名不能为空');
+          saveName.disabled = true;
+          api('/api/group/rename', { method: 'POST', body: { groupId: g.id, name: name } })
+            .then(function (res) {
+              g.name = res.name;
+              A.toast('群名已修改');
+              return load();
+            })
+            .catch(function (err) {
+              A.toast(errText(err));
+              saveName.disabled = false;
+            });
+        });
+        renameRow.appendChild(nameInput);
+        renameRow.appendChild(saveName);
+        panel.appendChild(renameRow);
+      }
+
+      panel.appendChild(h('div', {
+        class: 'group-section-label', text: '成员（' + data.members.length + '）'
+      }));
+      data.members.forEach(function (m) {
+        var row = h('div', { class: 'group-row' });
+        var main = h('div', { class: 'group-row-main' });
+        var name = h('div', { class: 'group-row-title', text: m.name + (m.me ? '（我）' : '') });
+        if (m.owner) name.appendChild(h('em', { class: 'group-tag', text: '群主' }));
+        main.appendChild(name);
+        main.appendChild(h('div', { class: 'group-row-meta', text: m.email }));
+        row.appendChild(main);
+        if (isOwner && !m.owner && !m.me) {
+          row.appendChild(h('button', {
+            class: 'ghost-btn danger-text', type: 'button', text: '移出',
+            onclick: function () {
+              A.askConfirm('GROUP', '移出成员', '把 ' + m.name + ' 移出这个群？', '移出', function () {
+                act('/api/group/kick', { groupId: g.id, userId: m.userId }, '已移出成员');
+              });
+            }
+          }));
+        }
+        panel.appendChild(row);
+      });
+
+      panel.appendChild(h('div', { class: 'group-section-label', text: '邀请成员' }));
+      var inviteRow = h('div', { class: 'group-inline-form' });
+      var emailInput = h('input', {
+        class: 'text-input', type: 'email', placeholder: '对方的注册邮箱',
+        'aria-label': '邀请邮箱'
+      });
+      var inviteBtn = h('button', { class: 'ghost-btn', type: 'button', text: '邀请' });
+      inviteBtn.addEventListener('click', function () {
+        var email = emailInput.value.trim();
+        if (!email) return A.toast('填写要邀请的邮箱');
+        inviteBtn.disabled = true;
+        api('/api/group/invite', { method: 'POST', body: { groupId: g.id, email: email } })
+          .then(function () { A.toast('已发出邀请'); emailInput.value = ''; })
+          .catch(function (err) { A.toast(errText(err)); })
+          .then(function () { inviteBtn.disabled = false; });
+      });
+      inviteRow.appendChild(emailInput);
+      inviteRow.appendChild(inviteBtn);
+      panel.appendChild(inviteRow);
+
+      if (isOwner && data.joinRequests.length) {
+        panel.appendChild(h('div', { class: 'group-section-label', text: '入群申请' }));
+        data.joinRequests.forEach(function (r) {
+          var row = h('div', { class: 'group-row' });
+          var main = h('div', { class: 'group-row-main' });
+          main.appendChild(h('div', { class: 'group-row-title', text: r.name }));
+          main.appendChild(h('div', { class: 'group-row-meta', text: r.email }));
+          row.appendChild(main);
+          var actions = h('div', { class: 'group-row-actions' });
+          actions.appendChild(h('button', {
+            class: 'ghost-btn danger-text', type: 'button', text: '拒绝',
+            onclick: function () {
+              act('/api/group/request/respond', { requestId: r.id, accept: false }, '已拒绝申请');
+            }
+          }));
+          actions.appendChild(h('button', {
+            class: 'ghost-btn', type: 'button', text: '同意',
+            onclick: function () {
+              act('/api/group/request/respond', { requestId: r.id, accept: true }, '已同意入群');
+            }
+          }));
+          row.appendChild(actions);
+          panel.appendChild(row);
+        });
+      }
+
+      panel.appendChild(h('div', {
+        class: 'group-section-label', text: '群文件（' + data.files.length + '）'
+      }));
+      if (!data.files.length) {
+        panel.appendChild(h('p', { class: 'group-note', text: '还没有人分享题库。在群聊里发送一个题库就会出现在这里。' }));
+      }
+      data.files.forEach(function (f) {
+        var row = h('div', { class: 'group-row' });
+        var main = h('div', { class: 'group-row-main' });
+        main.appendChild(h('div', { class: 'group-row-title', text: f.deckName || '题库' }));
+        main.appendChild(h('div', {
+          class: 'group-row-meta',
+          text: f.name + ' · ' + (f.deckCount || 0) + ' 条 · ' + fmtTime(f.createdAt)
+        }));
+        row.appendChild(main);
+        var actions = h('div', { class: 'group-row-actions' });
+        var imp = h('button', { class: 'ghost-btn', type: 'button', text: '导入' });
+        imp.addEventListener('click', function () {
+          A.askConfirm('GROUP', '导入题库',
+            '把「' + (f.deckName || '题库') + '」的 ' + (f.deckCount || 0) + ' 条词条并入我的题库？',
+            '导入',
+            function () {
+              api('/api/group/import', { method: 'POST', body: { messageId: f.id } }).then(function (res) {
+                var out = A.importDeck(res.deckName, res.cards);
+                A.toast(out && out.added ? '已导入 ' + out.added + ' 条' : '题库里没有新词条');
+              }).catch(function (err) {
+                A.toast(errText(err));
+              }).then(function () { openGroupSettings(group); });
+            },
+            function () { openGroupSettings(group); });
+        });
+        actions.appendChild(imp);
+
+        var drop = h('button', {
+          class: 'ghost-btn' + (isOwner ? ' danger-text' : ''),
+          type: 'button', text: isOwner ? '删除' : '忽略'
+        });
+        drop.addEventListener('click', function () {
+          if (isOwner) {
+            A.askConfirm('GROUP', '删除群文件',
+              '删除后，群聊里的这条分享和群文件都会消失，确定吗？',
+              '删除', function () {
+                api('/api/group/file/delete', { method: 'POST', body: { messageId: f.id } })
+                  .then(function () { A.toast('已删除'); openGroupSettings(group); })
+                  .catch(function (err) { A.toast(errText(err)); openGroupSettings(group); });
+              }, function () { openGroupSettings(group); });
+            return;
+          }
+          A.askConfirm('GROUP', '忽略题库',
+            '忽略后，这条题库不再出现在你的群文件里（聊天记录仍保留）。',
+            '忽略', function () {
+              api('/api/group/file/ignore', { method: 'POST', body: { messageId: f.id } })
+                .then(function () { A.toast('已忽略'); openGroupSettings(group); })
+                .catch(function (err) { A.toast(errText(err)); openGroupSettings(group); });
+            }, function () { openGroupSettings(group); });
+        });
+        actions.appendChild(drop);
+        row.appendChild(actions);
+        panel.appendChild(row);
+      });
+
+      var leave = h('button', { class: 'danger-btn group-leave', type: 'button', text: '退出群组' });
+      leave.addEventListener('click', function () {
+        var message = '退出后需要重新申请或被邀请才能回来。';
+        if (g.ownerId === (me && me.id)) {
+          message = g.memberCount > 1 || data.members.length > 1
+            ? '你是群主，退出后群主会自动转给最早加入的成员。'
+            : '你是最后一名成员，退出后这个群和所有群文件都会被删除。';
+        }
+        A.askConfirm('GROUP', '退出群组', message, '退出', function () {
+          api('/api/group/leave', { method: 'POST', body: { groupId: g.id } }).then(function (res) {
+            A.toast(res.deleted ? '群组已解散' : '已退出群组');
+            openGroup();
+          }).catch(function (err) { A.toast(errText(err)); });
+        }, function () { openGroupSettings(group); });
+      });
+      panel.appendChild(leave);
+    }
+
+    function load() {
+      return api('/api/group/settings?groupId=' + encodeURIComponent(group.id)).then(function (data) {
+        group.name = data.group.name;
+        group.groupNo = data.group.groupNo;
+        group.memberCount = data.group.memberCount;
+        render(data);
+      }).catch(function (err) {
+        panel.innerHTML = '';
+        panel.appendChild(h('p', { class: 'group-empty', text: errText(err) }));
+      });
+    }
+
+    var foot = document.createDocumentFragment();
+    foot.appendChild(h('span', { class: 'foot-left' }));
+    foot.appendChild(h('button', {
+      class: 'primary-btn', type: 'button', text: '返回',
+      onclick: function () { openGroupChat(group); }
+    }));
+
+    A.openModal({ kicker: 'GROUP', title: '群设置', body: body, foot: foot, autofocus: false });
+    load();
+  }
+
   function openMessages() {
     if (!session) return openAuth('login');
     var body = h('div', { class: 'thread-panel' });
@@ -897,6 +1599,8 @@
         pollTimer = null;
       }).observe(modalEl, { attributes: true, attributeFilter: ['hidden'] });
     }
+    var groupBtn = $('#groupBtn');
+    if (groupBtn) groupBtn.addEventListener('click', openGroup);
     var btn = $('#accountBtn');
     if (btn) {
       btn.addEventListener('click', function () {

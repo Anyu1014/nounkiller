@@ -29,6 +29,7 @@
 - **多题库**：切换、新建、重命名、删除、重置进度；「总收藏题库」固定置顶，汇总所有题库里点亮星标的词条，点开即可集中背诵。
 - **账号与云端（可选）**：邮箱 + 密码注册/登录。登录后题库、词条、SRS 进度、划线、收藏、设置同步到云端；换设备登录会询问「载入云端 / 用本机覆盖」。不登录时一切仍只在本机，原有体验不变。
 - **留言与管理员后台**：登录用户可给管理员留言（8 秒轮询回复）；管理员账号能看到注册用户列表、在线状态、题库/词条/收藏数量与未读留言，并可逐个用户回复。未读在顶部账号按钮上有红点。
+- **题库群组**：主界面右上角的群组图标进入（账号与设置之间）；登录后可建群（自动生成 8 位唯一群号，创建者即群主），也能输入群号申请加入、或按邮箱邀请（对方在群组列表右上角「消息」里接受 / 拒绝）。群聊支持发文字和分享整个题库，题库卡片可「预览」或「获取」（确认后并入同名题库）；右上角齿轮进入群设置，可看成员与群文件，群主还能改名、审批入群申请、移出成员；成员可随时退群，群主退出自动转给最早加入的成员，最后一人退出即解散。
 
 ## 目录
 
@@ -86,7 +87,7 @@ cd src && npx wrangler pages dev web --port 8788 --d1=DB --compatibility-date=20
 后端不引入第三方账号体系，直接跑在同一个 Pages 项目里：
 
 - `src/web/_worker.js`：Pages Advanced Mode 单文件 Worker。`/api/*` 由它处理，其余请求 `env.ASSETS.fetch` 回静态资源。
-- `src/server/schema.sql`：D1 表结构（users / sessions / user_data / messages；users 含 `deleted_at` 软删除），Worker 首次请求也会 `CREATE TABLE IF NOT EXISTS` 并补列。
+- `src/server/schema.sql`：D1 表结构（users / sessions / user_data / messages / chat_*；users 含 `deleted_at` 软删除），Worker 首次请求也会 `CREATE TABLE IF NOT EXISTS` 并补列。
 - 认证：PBKDF2-SHA256（100k 次，Workers WebCrypto 上限）+ 随机盐；会话只把 SHA-256 令牌摘要存 D1，有效期 60 天；Bearer Token，无 Cookie。
 - 同步：每个用户一份 JSON 快照，`PUT /api/me/data` 带 `baseVersion` 做乐观锁，冲突返回 409 与云端数据。
 - 在线状态：前台每 30 秒心跳，90 秒内有心跳记为在线；管理员列表 20 秒刷新。
