@@ -3,6 +3,7 @@
 
     <!-- 点亮字块时的轻微振动反馈（navigator.vibrate） -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="true"
