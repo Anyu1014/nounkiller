@@ -212,7 +212,6 @@ async function handleRegister(request, env) {
   return json({
     token,
     user: { id, email, isAdmin: isAdmin === 1, createdAt: now },
-    firstUser,
   }, 201);
 }
 
