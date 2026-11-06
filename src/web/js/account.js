@@ -150,6 +150,10 @@
     fieldPass.appendChild(pass);
     var hint = h('p', { class: 'field-hint', text: '密码至少 8 位。注册不需要邮箱验证码。' });
     fieldPass.appendChild(hint);
+    fieldPass.appendChild(h('button', {
+      class: 'auth-link', type: 'button', text: '忘记密码？用注册邮箱重置',
+      onclick: function () { openReset(email.value.trim()); }
+    }));
     body.appendChild(fieldPass);
 
     var errorLine = h('p', { class: 'account-error', hidden: true });
@@ -206,6 +210,139 @@
 
     submit.addEventListener('click', function () { form.requestSubmit(); });
     A.openModal({ kicker: 'ACCOUNT', title: '登录 NounKiller', body: form, foot: foot, autofocus: false });
+    setTimeout(function () { email.focus(); }, 60);
+  }
+
+  function openReset(prefill) {
+    var body = h('div', { class: 'account-form' });
+    body.appendChild(h('p', { class: 'account-intro', text: '输入注册邮箱，我们会发一封 6 位验证码邮件。验证码 10 分钟内有效，重置后所有设备需重新登录。' }));
+
+    var fieldEmail = h('div', { class: 'field' });
+    fieldEmail.appendChild(h('label', { for: 'nkResetEmail', text: '注册邮箱' }));
+    var email = h('input', { id: 'nkResetEmail', type: 'email', autocomplete: 'email', inputmode: 'email', placeholder: 'you@example.com' });
+    if (prefill) email.value = prefill;
+    fieldEmail.appendChild(email);
+    var send = h('button', { class: 'ghost-btn auth-send', type: 'button', text: '发送验证码' });
+    fieldEmail.appendChild(send);
+    body.appendChild(fieldEmail);
+
+    var fieldCode = h('div', { class: 'field' });
+    fieldCode.appendChild(h('label', { for: 'nkResetCode', text: '邮箱验证码' }));
+    var code = h('input', { id: 'nkResetCode', type: 'text', autocomplete: 'one-time-code', inputmode: 'numeric', maxlength: '6', placeholder: '6 位数字' });
+    fieldCode.appendChild(code);
+    var status = h('p', { class: 'field-hint', id: 'nkResetStatus', text: '验证码只用于重置密码，不会用于登录。' });
+    fieldCode.appendChild(status);
+    body.appendChild(fieldCode);
+
+    var fieldPass = h('div', { class: 'field' });
+    fieldPass.appendChild(h('label', { for: 'nkResetPassword', text: '新密码' }));
+    var pass = h('input', { id: 'nkResetPassword', type: 'password', autocomplete: 'new-password', placeholder: '至少 8 位' });
+    fieldPass.appendChild(pass);
+    body.appendChild(fieldPass);
+
+    var fieldConfirm = h('div', { class: 'field' });
+    fieldConfirm.appendChild(h('label', { for: 'nkResetConfirm', text: '再输一次' }));
+    var confirm = h('input', { id: 'nkResetConfirm', type: 'password', autocomplete: 'new-password', placeholder: '再次输入新密码' });
+    fieldConfirm.appendChild(confirm);
+    body.appendChild(fieldConfirm);
+
+    var errorLine = h('p', { class: 'account-error', hidden: true });
+    body.appendChild(errorLine);
+
+    var submit = h('button', { class: 'primary-btn account-submit', type: 'button', text: '重置并登录' });
+    var form = h('form', { class: 'account-auth-form' });
+    form.appendChild(body);
+    var foot = document.createDocumentFragment();
+    foot.appendChild(h('span', { class: 'foot-left' }));
+    foot.appendChild(h('button', { class: 'ghost-btn', type: 'button', text: '取消', onclick: A.closeModal }));
+    foot.appendChild(submit);
+
+    var cooldown = 0;
+    var timer = null;
+
+    function tick() {
+      if (timer) clearInterval(timer);
+      send.disabled = true;
+      (function run() {
+        if (cooldown <= 0) {
+          send.disabled = false;
+          send.textContent = '重新发送';
+          return;
+        }
+        send.textContent = '重发 ' + cooldown + 's';
+        cooldown -= 1;
+        timer = setTimeout(run, 1000);
+      })();
+    }
+
+    function sendCode() {
+      var addr = email.value.trim();
+      if (!addr) {
+        errorLine.textContent = '请先填写注册邮箱';
+        errorLine.hidden = false;
+        email.focus();
+        return;
+      }
+      send.disabled = true;
+      send.textContent = '发送中…';
+      errorLine.hidden = true;
+      api('/api/auth/forgot', { method: 'POST', body: { email: addr } }).then(function (data) {
+        cooldown = Number(data && data.cooldown) || 60;
+        status.textContent = '验证码已发送，请查收邮件（含垃圾箱），10 分钟内有效。';
+        errorLine.hidden = true;
+        tick();
+        code.focus();
+      }).catch(function (err) {
+        errorLine.textContent = errText(err);
+        errorLine.hidden = false;
+        send.disabled = false;
+        send.textContent = '发送验证码';
+      });
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var addr = email.value.trim();
+      var digits = code.value.trim();
+      var pwd = pass.value;
+      if (!addr || !/^\d{6}$/.test(digits)) {
+        errorLine.textContent = '请填写邮箱和 6 位验证码';
+        errorLine.hidden = false;
+        return;
+      }
+      if (pwd.length < 8) {
+        errorLine.textContent = '密码至少 8 位';
+        errorLine.hidden = false;
+        pass.focus();
+        return;
+      }
+      if (pwd !== confirm.value) {
+        errorLine.textContent = '两次输入的密码不一致';
+        errorLine.hidden = false;
+        confirm.focus();
+        return;
+      }
+      submit.disabled = true;
+      submit.textContent = '重置中…';
+      errorLine.hidden = true;
+      api('/api/auth/reset', { method: 'POST', body: { email: addr, code: digits, password: pwd } }).then(function (data) {
+        saveSession({ token: data.token, user: data.user, email: addr });
+        me = data.user;
+        A.closeModal();
+        updateAccountBtn();
+        A.toast('密码已重置，已登录');
+        startCloud();
+      }).catch(function (err) {
+        errorLine.textContent = errText(err);
+        errorLine.hidden = false;
+        submit.disabled = false;
+        submit.textContent = '重置并登录';
+      });
+    });
+
+    send.addEventListener('click', sendCode);
+    submit.addEventListener('click', function () { form.requestSubmit(); });
+    A.openModal({ kicker: 'ACCOUNT', title: '重置密码', body: form, foot: foot, autofocus: false });
     setTimeout(function () { email.focus(); }, 60);
   }
 

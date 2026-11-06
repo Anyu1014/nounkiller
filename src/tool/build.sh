@@ -17,7 +17,7 @@ NODE="${NODE_BIN:-/Users/y/toolchains/bin/node}"
 
 # 版本策略：只递增 major.minor，patch 恒为 0（如 1.3.0 → 1.4.0）
 VERSION="$(sed -nE "s/.*versionName ['\"]([^'\"]+)['\"].*/\1/p" "$SRC/android/app/build.gradle" | head -1)"
-VERSION="${VERSION:-1.4.0}"
+VERSION="${VERSION:-1.5.0}"
 APK_NAME="NounKiller-$VERSION.apk"
 IPA_NAME="NounKiller-$VERSION.ipa"
 

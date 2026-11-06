@@ -86,7 +86,7 @@ cd src && npx wrangler pages dev web --port 8788 --d1=DB --compatibility-date=20
 后端不引入第三方账号体系，直接跑在同一个 Pages 项目里：
 
 - `src/web/_worker.js`：Pages Advanced Mode 单文件 Worker。`/api/*` 由它处理，其余请求 `env.ASSETS.fetch` 回静态资源。
-- `src/server/schema.sql`：D1 表结构（users / sessions / user_data / messages），Worker 首次请求也会 `CREATE TABLE IF NOT EXISTS`。
+- `src/server/schema.sql`：D1 表结构（users / sessions / user_data / messages / email_codes），Worker 首次请求也会 `CREATE TABLE IF NOT EXISTS`。
 - 认证：PBKDF2-SHA256（100k 次，Workers WebCrypto 上限）+ 随机盐；会话只把 SHA-256 令牌摘要存 D1，有效期 60 天；Bearer Token，无 Cookie。
 - 同步：每个用户一份 JSON 快照，`PUT /api/me/data` 带 `baseVersion` 做乐观锁，冲突返回 409 与云端数据。
 - 在线状态：前台每 30 秒心跳，90 秒内有心跳记为在线；管理员列表 20 秒刷新。
@@ -96,11 +96,16 @@ cd src && npx wrangler pages dev web --port 8788 --d1=DB --compatibility-date=20
 
 1. 在 Cloudflare 控制台创建 D1 数据库（名称随意，如 `nounkiller`），记下 Database ID。
 2. Pages 项目 `nounkiller` → Settings → Functions → D1 bindings：变量名填 `DB`，选中该数据库（Production 与 Preview 都加）。
-3. Pages 项目环境变量加 `ADMIN_EMAILS=你的管理员邮箱`（必填，否则没有人能进管理后台）。
-4. 推送 `1.2` 分支，Pages 会自动重新部署；首次访问 `/api/health` 应返回 `{"ok":true,"cloud":true}`。
-5. 打开网页右上角账号按钮注册；管理员登录后账号面板会出现「管理后台」。
+3. Pages 项目环境变量加 `ADMIN_EMAILS=你的管理员邮箱`（逗号分隔，必填，否则没有人能进管理后台）。
+4. 注册通知与找回密码验证码走 [Brevo](https://www.brevo.com/) HTTP API：
+   - 在 Brevo 验证发件邮箱（例如 `2164206282@qq.com`），创建 API Key；
+   - Pages 项目 → Settings → Variables and Secrets 添加 **Secret** `BREVO_API_KEY`（值不要写进仓库）；
+   - 再加普通变量 `MAIL_FROM=2164206282@qq.com`、`MAIL_FROM_NAME=NounKiller`。
+   - 未配置 `BREVO_API_KEY` 时注册仍成功（不发通知），但「忘记密码」会提示邮件服务未配置。
+5. 推送 `1.2` 分支，Pages 会自动重新部署；首次访问 `/api/health` 应返回 `{"ok":true,"cloud":true,"mail":true}`。
+6. 打开网页右上角账号按钮注册；管理员邮箱注册后账号面板会出现「管理后台」。
 
-没有邮箱验证码与自助找回密码：注册即生效；忘记密码需要管理员在 D1 里重置 `pass_hash` / `salt`，或删除该用户重新注册。
+注册只发通知邮件，不需要点链接验证；忘记密码用注册邮箱收 6 位验证码，10 分钟内有效，重置后所有旧会话立即失效。
 
 ## 已知边界
 
