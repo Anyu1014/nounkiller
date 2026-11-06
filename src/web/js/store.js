@@ -346,6 +346,15 @@
       return rebuilt.length;
     }
 
+    function replaceState(raw) {
+      var next = normalize(raw);
+      if (!next) throw new Error('云端数据格式不正确');
+      ensureToday(next);
+      state = next;
+      saveNow();
+      return state;
+    }
+
     function resetDeckProgress(deckId) {
       var now = Date.now();
       var count = 0;
@@ -387,7 +396,9 @@
 
     return {
       state: state,
+      getState: function () { return state; },
       save: save,
+      replaceState: replaceState,
       saveNow: saveNow,
       deckCards: deckCards,
       deckById: deckById,

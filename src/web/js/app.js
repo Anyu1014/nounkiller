@@ -1189,7 +1189,7 @@
 
     body.appendChild(h('p', {
       class: 'import-help',
-      text: '词条与学习进度都保存在本机；换设备前请先导出浏览器数据或重新导入题库。'
+      text: '不登录时词条与进度只保存在本机；登录后会同步到你的云端空间，换设备可继续。'
     }));
 
     openModal({
@@ -1558,11 +1558,11 @@
     g4.appendChild(h('p', { class: 'about-author', text: '作者：Anyu' }));
     g4.appendChild(h('p', {
       class: 'about-note',
-      text: 'NounKiller v1.3 · 专注名词解释的背诵工具。三级评级快速自测；不熟悉时逐字点亮回忆，再用间隔重复把「看过」变成「说得出」。'
+      text: 'NounKiller v1.4 · 专注名词解释的背诵工具。三级评级快速自测；不熟悉时逐字点亮回忆，再用间隔重复把「看过」变成「说得出」。'
     }));
     g4.appendChild(h('p', {
       class: 'about-note',
-      text: '所有题库、进度与划线仅保存在本机，不会上传。'
+      text: '题库、进度与划线默认只保存在本机；登录后可选择同步到自己的云端空间。'
     }));
     body.appendChild(g4);
 
@@ -1771,6 +1771,24 @@
     startSession();
     armMidnightRefresh();
   }
+
+  // 供 account.js 复用界面与状态
+  window.MJZ.app = {
+    get state() { return S; },
+    get store() { return store; },
+    replaceState: function (raw) {
+      S = store.replaceState(raw);
+      applyFontScale();
+      startSession();
+      return S;
+    },
+    openModal: openModal,
+    closeModal: closeModal,
+    modalFoot: modalFoot,
+    askConfirm: askConfirm,
+    toast: toast,
+    h: h
+  };
 
   boot();
 })();

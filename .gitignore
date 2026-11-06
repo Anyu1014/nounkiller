@@ -22,3 +22,6 @@ src/ios/*.xcworkspace/
 # 签名文件不入库
 src/android/app/*.keystore
 src/android/app/*.jks
+
+# 本地 wrangler 状态
+src/.wrangler/
