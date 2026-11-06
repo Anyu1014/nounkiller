@@ -87,7 +87,7 @@ cd src && npx wrangler pages dev web --port 8788 --d1=DB --compatibility-date=20
 
 - `src/web/_worker.js`：Pages Advanced Mode 单文件 Worker。`/api/*` 由它处理，其余请求 `env.ASSETS.fetch` 回静态资源。
 - `src/server/schema.sql`：D1 表结构（users / sessions / user_data / messages），Worker 首次请求也会 `CREATE TABLE IF NOT EXISTS`。
-- 认证：PBKDF2-SHA256（150k 次）+ 随机盐；会话只把 SHA-256 令牌摘要存 D1，有效期 60 天；Bearer Token，无 Cookie。
+- 认证：PBKDF2-SHA256（100k 次，Workers WebCrypto 上限）+ 随机盐；会话只把 SHA-256 令牌摘要存 D1，有效期 60 天；Bearer Token，无 Cookie。
 - 同步：每个用户一份 JSON 快照，`PUT /api/me/data` 带 `baseVersion` 做乐观锁，冲突返回 409 与云端数据。
 - 在线状态：前台每 30 秒心跳，90 秒内有心跳记为在线；管理员列表 20 秒刷新。
 - 管理员：`ADMIN_EMAILS` 环境变量（逗号分隔）命中的邮箱注册后自动成为管理员；空库时第一个注册用户也会成为管理员。部署后请立刻用管理员邮箱注册，或提前配置 `ADMIN_EMAILS`。
