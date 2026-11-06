@@ -200,9 +200,8 @@ async function handleRegister(request, env) {
 
   const salt = bytesToB64(crypto.getRandomValues(new Uint8Array(16)));
   const hash = await hashPassword(password, salt);
-  const countRow = await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first();
-  const firstUser = !countRow || countRow.n === 0;
-  const isAdmin = firstUser || adminEmails(env).includes(email) ? 1 : 0;
+  // 管理员只由 ADMIN_EMAILS 指定；不做“首个用户自动管理员”，避免公开站点被抢注。
+  const isAdmin = adminEmails(env).includes(email) ? 1 : 0;
   const id = crypto.randomUUID();
   const now = Date.now();
   await env.DB.prepare(
