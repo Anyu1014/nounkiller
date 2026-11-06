@@ -195,7 +195,6 @@
         A.closeModal();
         updateAccountBtn();
         A.toast(current === 'login' ? '已登录，正在同步云端' : '注册成功，已登录');
-        if (data.firstUser) A.toast('你是第一个账号，已设为管理员');
         startCloud();
       }).catch(function (err) {
         errorLine.textContent = errText(err);
