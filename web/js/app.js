@@ -9,7 +9,7 @@
   var store = window.MJZ.store.create();
   var S = store.state;
 
-  var APP_VERSION = (document.querySelector('meta[name="app-version"]') || {}).content || '2.0.0';
+  var APP_VERSION = (document.querySelector('meta[name="app-version"]') || {}).content || '2.1.0';
 
   var RATING_LABEL = { known: '熟悉', fuzzy: '不熟悉', unknown: '不认识' };
   var RATING_ORDER = ['unknown', 'fuzzy', 'known'];
@@ -868,6 +868,7 @@
         els.modalActions.insertBefore(opts.action, els.modalActions.firstChild);
       }
     }
+    els.modal.classList.toggle('is-tall', opts.tall === true);
     els.modal.hidden = false;
     els.body.style.overflow = 'hidden';
     var focusable = els.modal.querySelector('button, input, textarea, select, [tabindex]');
@@ -878,6 +879,7 @@
     if (!app.modalOpen) return;
     app.modalOpen = false;
     els.modal.hidden = true;
+    els.modal.classList.remove('is-tall');
     els.body.style.overflow = '';
     if (app.lastFocused && app.lastFocused.focus) {
       try { app.lastFocused.focus(); } catch (e) { /* ignore */ }
@@ -1793,7 +1795,18 @@
     if (document.visibilityState === 'visible') refreshIfNewDay();
   });
 
+  function measureAppbar() {
+    var bar = document.querySelector('.appbar');
+    if (!bar) return;
+    var h = Math.round(bar.getBoundingClientRect().height);
+    if (h > 0) document.documentElement.style.setProperty('--appbar-h', h + 'px');
+  }
+
   function boot() {
+    measureAppbar();
+    window.addEventListener('resize', measureAppbar);
+    window.addEventListener('orientationchange', function () { setTimeout(measureAppbar, 120); });
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(measureAppbar);
     fitBrandName();
     var brandFitFrame = null;
     window.addEventListener('resize', function () {

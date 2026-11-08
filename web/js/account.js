@@ -10,6 +10,7 @@
 
   var A = window.MJZ.app;
   if (!A) return;
+  var C = window.MJZ.core;
   var h = A.h;
 
   var SESSION_KEY = 'nounkiller.session.v1';
@@ -304,8 +305,44 @@
     A.openModal({ kicker: 'ACCOUNT', title: '找回密码', body: body, foot: foot, autofocus: false });
   }
 
+  /* ---------------- 群组本地缓存（列表 / 聊天，进面板先显示上次内容） ---------------- */
+
+  var GROUP_CACHE_KEY = 'nounkiller.groups.v1';
+  var GROUP_MSG_LIMIT = 200;
+
+  function cacheStoreName() {
+    var owner = (session && ((session.user && session.user.id) || session.email)) || '';
+    return GROUP_CACHE_KEY + '.' + owner;
+  }
+
+  function cacheRead(key) {
+    try {
+      var all = JSON.parse(localStorage.getItem(cacheStoreName()) || '{}');
+      return all && all[key] !== undefined ? all[key] : null;
+    } catch (e) { return null; }
+  }
+
+  function cacheWrite(key, value) {
+    try {
+      var name = cacheStoreName();
+      var all = JSON.parse(localStorage.getItem(name) || '{}');
+      all[key] = value;
+      localStorage.setItem(name, JSON.stringify(all));
+    } catch (e) { /* 存储满了也不影响使用，下次照样从网络取 */ }
+  }
+
+  function cacheClear() {
+    try {
+      for (var i = localStorage.length - 1; i >= 0; i--) {
+        var key = localStorage.key(i);
+        if (key && key.indexOf(GROUP_CACHE_KEY + '.') === 0) localStorage.removeItem(key);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
   function logout() {
     api('/api/auth/logout', { method: 'POST' }).catch(function () { /* ignore */ });
+    cacheClear();
     saveSession(null);
     me = null;
     cloudVersion = 0;
@@ -381,7 +418,7 @@
     setNote();
   }
 
-  function askConflict(remote, localOnly) {
+  function askConflict(remote) {
     syncPaused = true;
     var local = countLocal();
     var body = h('div');
@@ -428,7 +465,7 @@
         A.toast('已载入云端数据');
       }
     }));
-    A.openModal({ kicker: 'SYNC', title: localOnly ? '选择云端数据' : '同步冲突', body: body, foot: foot, autofocus: false });
+    A.openModal({ kicker: 'SYNC', title: '同步冲突', body: body, foot: foot, autofocus: false });
   }
 
   function pullCloud(first) {
@@ -445,7 +482,6 @@
         return null;
       }
       cloudVersion = data.updatedAt;
-      var local = countLocal();
       var remotePayload = canonPayload(data.payload);
       var same = hashOf(payloadOf()) === hashOf(remotePayload);
       if (same) {
@@ -456,15 +492,11 @@
         return null;
       }
       if (first) {
-        if (local.cards === 0) {
-          adoptCloud(remotePayload, data.updatedAt);
-          A.toast('已载入云端数据');
-        } else {
-          askConflict({ payload: remotePayload, updatedAt: data.updatedAt }, true);
-        }
-        return null;
+        // 登录后默认静默合并：云端为底、本机新增并入，再整体推回云端
+        adoptCloud(C.mergeState(payloadOf(), remotePayload), data.updatedAt);
+        return pushNow(true);
       }
-      askConflict({ payload: remotePayload, updatedAt: data.updatedAt }, false);
+      askConflict({ payload: remotePayload, updatedAt: data.updatedAt });
       return null;
     }).catch(function (err) {
       if (err.status === 401) return handleExpired();
@@ -494,7 +526,7 @@
       if (err.status === 401) return handleExpired();
       if (err.status === 409 && err.data && err.data.payload) {
         syncPaused = true;
-        askConflict({ payload: err.data.payload, updatedAt: err.data.updatedAt }, false);
+        askConflict({ payload: err.data.payload, updatedAt: err.data.updatedAt });
         syncNote = '云端有新数据，等待选择';
         setNote();
         return;
@@ -568,6 +600,7 @@
   }
 
   function startCloud() {
+    syncPaused = false;   // 重新登录/启动时恢复自动同步
     startTimers();
     heartbeat();
     fetchUnread();
@@ -630,7 +663,7 @@
 
     body.appendChild(h('p', {
       class: 'account-foot-note',
-      text: '云端保存题库、词条、SRS 进度、划线、收藏与设置。换设备登录后选择「载入云端」即可接着背。'
+      text: '云端保存题库、词条、SRS 进度、划线、收藏与设置。换设备登录会自动合并云端与本机数据。'
     }));
 
     var foot = document.createDocumentFragment();
@@ -732,24 +765,45 @@
           text: '群号 ' + g.groupNo + ' · ' + (g.memberCount || 1) + ' 人'
         }));
         row.appendChild(main);
+        if (g.unread > 0) {
+          row.appendChild(h('span', {
+            class: 'group-unread',
+            text: g.unread > 99 ? '99+' : String(g.unread),
+            'aria-label': g.unread + ' 条未读'
+          }));
+        }
         list.appendChild(row);
       });
     }
 
     function load() {
       return api('/api/group/list').then(function (data) {
-        render(data.groups || []);
+        var groups = data.groups || [];
+        cacheWrite('list', groups);
+        render(groups);
       }).catch(function (err) {
+        if (cacheRead('list')) return;   // 有缓存就静默保留，不闪错误
         list.innerHTML = '';
         list.appendChild(h('p', { class: 'group-empty', text: errText(err) }));
       }).then(function () {
         api('/api/group/inbox').then(function (data) {
           var n = (data.invites || []).length + (data.joinRequests || []).length;
-          inboxBtn.textContent = n ? '消息（' + n + '）' : '消息';
-          inboxBtn.classList.toggle('has-badge', n > 0);
+          cacheWrite('inboxCount', n);
+          paintInbox(n);
         }).catch(function () { /* 消息数只是提示 */ });
       });
     }
+
+    function paintInbox(n) {
+      inboxBtn.textContent = n ? '消息（' + n + '）' : '消息';
+      inboxBtn.classList.toggle('has-badge', n > 0);
+    }
+
+    var cachedGroups = cacheRead('list');
+    var cachedInbox = cacheRead('inboxCount');
+    if (cachedInbox) paintInbox(cachedInbox);
+    if (cachedGroups && cachedGroups.length) render(cachedGroups);
+    else list.appendChild(h('p', { class: 'group-empty', text: '正在加载群组…' }));
 
     var foot = document.createDocumentFragment();
     foot.appendChild(h('button', {
@@ -764,6 +818,7 @@
 
     A.openModal({ kicker: 'GROUP', title: '群组题库', body: body, foot: foot, autofocus: false });
     load();
+    groupPollTimer = trackModalTimer(setInterval(load, 10000));   // 静默刷新未读数
   }
 
   function openGroupCreate() {
@@ -1104,8 +1159,11 @@
 
     function load() {
       return api('/api/group/messages?groupId=' + encodeURIComponent(group.id)).then(function (data) {
-        render(data.messages || []);
+        var messages = data.messages || [];
+        cacheWrite('msgs:' + group.id, messages.slice(-GROUP_MSG_LIMIT));
+        render(messages);
       }).catch(function (err) {
+        if (previewing || cacheRead('msgs:' + group.id)) return;   // 有缓存就静默保留
         list.innerHTML = '';
         list.appendChild(h('p', { class: 'thread-empty', text: errText(err) }));
       });
@@ -1142,6 +1200,8 @@
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') submit();
     });
 
+    var cachedMsgs = cacheRead('msgs:' + group.id);
+    if (cachedMsgs && cachedMsgs.length) render(cachedMsgs);
     load();
     resumePoll();
 
@@ -1159,7 +1219,7 @@
     });
     A.openModal({
       kicker: 'GROUP', title: '群聊', body: body, foot: foot,
-      action: settingsBtn, autofocus: false
+      action: settingsBtn, autofocus: false, tall: true
     });
     setTimeout(function () { input.focus(); }, 60);
   }
@@ -1384,7 +1444,7 @@
       onclick: function () { openGroupChat(group); }
     }));
 
-    A.openModal({ kicker: 'GROUP', title: '群设置', body: body, foot: foot, autofocus: false });
+    A.openModal({ kicker: 'GROUP', title: '群设置', body: body, foot: foot, autofocus: false, tall: true });
     load();
   }
 

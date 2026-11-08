@@ -147,7 +147,8 @@ async function ensureSchema(env) {
         owner_id TEXT NOT NULL, created_at INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS chat_members (
         group_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member',
-        joined_at INTEGER NOT NULL, PRIMARY KEY (group_id, user_id))`,
+        joined_at INTEGER NOT NULL, last_read_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (group_id, user_id))`,
       `CREATE TABLE IF NOT EXISTS chat_invites (
         id TEXT PRIMARY KEY, group_id TEXT NOT NULL, inviter_id TEXT NOT NULL, invitee_id TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, UNIQUE(group_id, invitee_id))`,
@@ -170,6 +171,9 @@ async function ensureSchema(env) {
     // 老库补列；已存在时会报 duplicate column，忽略即可。
     try {
       await env.DB.prepare('ALTER TABLE users ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0').run();
+    } catch {}
+    try {
+      await env.DB.prepare('ALTER TABLE chat_members ADD COLUMN last_read_at INTEGER NOT NULL DEFAULT 0').run();
     } catch {}
   })();
   return schemaReady;
@@ -623,6 +627,7 @@ function groupView(row) {
     ownerId: row.owner_id,
     role: row.role || 'member',
     memberCount: Number(row.member_count || 0),
+    unread: Number(row.unread || 0),
     createdAt: row.created_at,
   };
 }
@@ -665,10 +670,12 @@ async function handleGroups(request, env) {
   const user = await requireUser(request, env);
   const rows = await env.DB.prepare(
     `SELECT g.*, m.role,
-       (SELECT COUNT(*) FROM chat_members cm WHERE cm.group_id = g.id) AS member_count
+       (SELECT COUNT(*) FROM chat_members cm WHERE cm.group_id = g.id) AS member_count,
+       (SELECT COUNT(*) FROM chat_messages um
+         WHERE um.group_id = g.id AND um.user_id != ? AND um.created_at > m.last_read_at) AS unread
      FROM chat_groups g JOIN chat_members m ON m.group_id = g.id
      WHERE m.user_id = ? ORDER BY g.created_at DESC`,
-  ).bind(user.id).all();
+  ).bind(user.id, user.id).all();
   return json({ groups: (rows.results || []).map(groupView) });
 }
 
@@ -684,8 +691,8 @@ async function handleGroupCreate(request, env) {
     'INSERT INTO chat_groups (id, group_no, name, owner_id, created_at) VALUES (?, ?, ?, ?, ?)',
   ).bind(id, groupNo, name, user.id, now).run();
   await env.DB.prepare(
-    "INSERT INTO chat_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)",
-  ).bind(id, user.id, now).run();
+    "INSERT INTO chat_members (group_id, user_id, role, joined_at, last_read_at) VALUES (?, ?, 'owner', ?, ?)",
+  ).bind(id, user.id, now, now).run();
   return json({ group: { id, name, groupNo, ownerId: user.id, role: 'owner', memberCount: 1, createdAt: now } });
 }
 
@@ -772,8 +779,8 @@ async function handleGroupInviteRespond(request, env) {
   need(row, 404, '邀请已失效');
   if (accept) {
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO chat_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
-    ).bind(row.group_id, user.id, Date.now()).run();
+      "INSERT OR IGNORE INTO chat_members (group_id, user_id, role, joined_at, last_read_at) VALUES (?, ?, 'member', ?, ?)",
+    ).bind(row.group_id, user.id, Date.now(), Date.now()).run();
   }
   await env.DB.prepare("UPDATE chat_invites SET status = ? WHERE id = ?")
     .bind(accept ? 'accepted' : 'rejected', inviteId).run();
@@ -794,8 +801,8 @@ async function handleGroupJoinRespond(request, env) {
   need(row.owner_id === user.id, 403, '只有群主可以审批');
   if (accept) {
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO chat_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)",
-    ).bind(row.group_id, row.user_id, Date.now()).run();
+      "INSERT OR IGNORE INTO chat_members (group_id, user_id, role, joined_at, last_read_at) VALUES (?, ?, 'member', ?, ?)",
+    ).bind(row.group_id, row.user_id, Date.now(), Date.now()).run();
   }
   await env.DB.prepare("UPDATE chat_join_requests SET status = ? WHERE id = ?")
     .bind(accept ? 'accepted' : 'rejected', requestId).run();
@@ -935,6 +942,13 @@ async function handleGroupMessages(request, env) {
       `SELECT m.*, u.email FROM chat_messages m LEFT JOIN users u ON u.id = m.user_id
        WHERE m.group_id = ? ORDER BY m.created_at DESC LIMIT ?`,
     ).bind(groupId, GROUP_LIMIT).all();
+    // 只在真的有新消息时写一次，避免每次轮询都写库。
+    const newest = (rows.results || []).reduce((max, r) => Math.max(max, Number(r.created_at || 0)), 0);
+    if (newest > 0) {
+      await env.DB.prepare(
+        'UPDATE chat_members SET last_read_at = ? WHERE group_id = ? AND user_id = ? AND last_read_at < ?',
+      ).bind(Date.now(), groupId, user.id, newest).run();
+    }
     return json({ messages: (rows.results || []).map((r) => chatMessageView(r, user.id)).reverse() });
   }
   const data = await readJson(request);

@@ -474,6 +474,132 @@
     return n;
   }
 
+  /* ---------------- 云端合并 ---------------- */
+
+  // 登录后本机与云端都有数据时不弹窗选择：云端为底，把本机新增并入，再整体推回云端。
+  // 题库按 id 或同名归并，词条按 id 或「名词 + 解释」归并；并到同一条时收藏、划线取并集，
+  // 复习进度取更靠后的一份，释义用本机（当前设备）的。
+  function cardKeyOf(card) { return card.deckId + '\u0001' + card.term + '\u0001' + card.def; }
+
+  function laterSrs(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    var la = Number(a.lastAt) || 0, lb = Number(b.lastAt) || 0;
+    if (la !== lb) return lb > la ? b : a;
+    return (Number(b.reps) || 0) > (Number(a.reps) || 0) ? b : a;
+  }
+
+  function cardTouched(card) {
+    if (!card) return false;
+    if (card.fav === true) return true;
+    if (Array.isArray(card.highlights) && card.highlights.length) return true;
+    return !!(card.srs && card.srs.state && card.srs.state !== 'new');
+  }
+
+  function mergeState(local, remote) {
+    local = local && typeof local === 'object' ? local : {};
+    remote = remote && typeof remote === 'object' ? remote : {};
+    var remoteDecks = Array.isArray(remote.decks) ? remote.decks : [];
+    var remoteCards = Array.isArray(remote.cards) ? remote.cards : [];
+    var localDecks = Array.isArray(local.decks) ? local.decks : [];
+    var localCards = Array.isArray(local.cards) ? local.cards : [];
+
+    var decks = [];
+    var deckById = new Map();
+    var deckByName = new Map();
+
+    function addDeck(deck) {
+      var copy = Object.assign({}, deck);
+      decks.push(copy);
+      deckById.set(copy.id, copy);
+      if (typeof copy.name === 'string' && !deckByName.has(copy.name)) deckByName.set(copy.name, copy);
+      return copy;
+    }
+
+    remoteDecks.forEach(function (deck) {
+      if (deck && typeof deck.id === 'string' && deck.id) addDeck(deck);
+    });
+
+    var deckRemap = new Map();
+    localDecks.forEach(function (deck) {
+      if (!deck || typeof deck.id !== 'string' || !deck.id) return;
+      var hit = deckById.get(deck.id) ||
+        (typeof deck.name === 'string' ? deckByName.get(deck.name) : null);
+      if (hit) { deckRemap.set(deck.id, hit.id); return; }
+      // 换设备登录时，别把本机没动过的示例题库并进云端
+      if (deck.sample === true && remoteCards.length) {
+        var used = localCards.some(function (card) {
+          return card && card.deckId === deck.id && cardTouched(card);
+        });
+        if (!used) return;
+      }
+      deckRemap.set(deck.id, addDeck(deck).id);
+    });
+
+    var cards = [];
+    var cardById = new Map();
+    var cardByKey = new Map();
+
+    function addCard(card) {
+      var copy = Object.assign({}, card, {
+        fav: card.fav === true,
+        highlights: Array.isArray(card.highlights) ? card.highlights.slice() : []
+      });
+      cards.push(copy);
+      cardById.set(copy.id, copy);
+      cardByKey.set(cardKeyOf(copy), copy);
+      return copy;
+    }
+
+    function combine(target, mine) {
+      if (typeof mine.term === 'string' && mine.term) target.term = mine.term;
+      if (typeof mine.def === 'string' && mine.def) target.def = mine.def;
+      target.fav = target.fav === true || mine.fav === true;
+      var seen = new Set(target.highlights.map(function (h) {
+        return [h.start, h.end, h.color, h.style].join(':');
+      }));
+      (Array.isArray(mine.highlights) ? mine.highlights : []).forEach(function (h) {
+        if (!h || typeof h !== 'object') return;
+        var key = [h.start, h.end, h.color, h.style].join(':');
+        if (seen.has(key)) return;
+        seen.add(key);
+        target.highlights.push(h);
+      });
+      target.srs = laterSrs(target.srs, mine.srs);
+    }
+
+    remoteCards.forEach(function (card) {
+      if (card && typeof card.id === 'string' && card.id) addCard(card);
+    });
+
+    localCards.forEach(function (card) {
+      if (!card || typeof card.id !== 'string' || !card.id) return;
+      var deckId = deckRemap.get(card.deckId);
+      if (!deckId && deckById.has(card.deckId)) deckId = card.deckId;
+      if (!deckId) return;
+      var mine = Object.assign({}, card, { deckId: deckId });
+      var hit = cardById.get(mine.id) || cardByKey.get(cardKeyOf(mine));
+      if (!hit) { addCard(mine); return; }
+      combine(hit, mine);
+    });
+
+    function hasDeck(id) { return decks.some(function (d) { return d.id === id; }); }
+    var activeDeckId = deckRemap.get(local.activeDeckId) || local.activeDeckId;
+    if (activeDeckId !== '__favorites__' && !hasDeck(activeDeckId)) {
+      activeDeckId = hasDeck(remote.activeDeckId) ? remote.activeDeckId : (decks[0] && decks[0].id);
+    }
+
+    return {
+      version: Math.max(Number(local.version) || 0, Number(remote.version) || 0, 3),
+      createdAt: Number(local.createdAt) || Number(remote.createdAt) || Date.now(),
+      activeDeckId: activeDeckId,
+      decks: decks,
+      cards: cards,
+      stats: local.stats || remote.stats,
+      settings: local.settings || remote.settings
+    };
+  }
+
   /* ---------------- 时间/杂项 ---------------- */
 
   function dateKey(d) {
@@ -535,6 +661,7 @@
     dateKey: dateKey,
     formatDue: formatDue,
     formatDuration: formatDuration,
+    mergeState: mergeState,
     uid: uid
   };
 })(typeof window !== 'undefined' ? window : globalThis);

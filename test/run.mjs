@@ -298,3 +298,61 @@ test('dedupe 按名词+解释去重', () => {
   ];
   assert.equal(C.dedupe(cards).length, 2);
 });
+
+test('mergeState：登录后本机新增并入云端，不询问、不丢数据', () => {
+  const remote = {
+    version: 3, createdAt: 1, activeDeckId: 'd1',
+    decks: [{ id: 'd1', name: '经济', createdAt: 1 }],
+    cards: [
+      {
+        id: 'c1', deckId: 'd1', term: '机会成本', def: 'A', createdAt: 1,
+        fav: false, highlights: [{ start: 0, end: 2, color: 'yellow', style: 'marker' }],
+        srs: { state: 'review', reps: 2, lastAt: 500, due: 9 }
+      },
+      { id: 'c2', deckId: 'd1', term: '沉没成本', def: 'B', createdAt: 1, fav: false, highlights: [], srs: { state: 'new', reps: 0 } }
+    ],
+    stats: { day: '2026-01-01' },
+    settings: { dailyNew: 0 }
+  };
+  const local = {
+    version: 3, createdAt: 2, activeDeckId: 'd2',
+    decks: [
+      { id: 'd2', name: '自家题库', createdAt: 2 },
+      { id: 'd3', name: '经济', createdAt: 2 },
+      { id: 'd9', name: '示例题库 · 记忆与决策', createdAt: 2, sample: true }
+    ],
+    cards: [
+      {
+        id: 'c1', deckId: 'd1', term: '机会成本', def: 'A', createdAt: 1,
+        fav: true, highlights: [{ start: 4, end: 6, color: 'green', style: 'line' }],
+        srs: { state: 'new', reps: 0 }
+      },
+      { id: 'c3', deckId: 'd2', term: '新词', def: 'C', createdAt: 3, fav: false, highlights: [], srs: { state: 'new', reps: 0 } },
+      // 同名题库：本地这条并入云端「经济」，不多出一个题库
+      { id: 'c4', deckId: 'd3', term: '边际效用', def: 'D', createdAt: 3, fav: false, highlights: [], srs: { state: 'new', reps: 0 } },
+      // 本机示例题库没动过，不该被并进云端
+      { id: 'c9', deckId: 'd9', term: '演示', def: 'E', createdAt: 2, fav: false, highlights: [], srs: { state: 'new', reps: 0 } }
+    ],
+    stats: { day: '2026-02-02' },
+    settings: { dailyNew: 5 }
+  };
+
+  const merged = C.mergeState(local, remote);
+  assert.deepEqual(merged.decks.map((d) => d.id), ['d1', 'd2']);
+  assert.deepEqual(merged.cards.map((c) => c.id), ['c1', 'c2', 'c3', 'c4']);
+  assert.equal(merged.cards.find((c) => c.id === 'c4').deckId, 'd1');
+
+  const c1 = merged.cards.find((c) => c.id === 'c1');
+  assert.equal(c1.fav, true);
+  assert.equal(c1.highlights.length, 2);
+  assert.equal(c1.srs.state, 'review');   // 复习进度取更靠后的一份
+  assert.equal(merged.activeDeckId, 'd2');
+  assert.equal(merged.settings.dailyNew, 5); // 设置用本机的
+  assert.equal(merged.stats.day, '2026-02-02');
+
+  // 云端为空时，本机数据原样进云端
+  const onlyLocal = C.mergeState(local, { decks: [], cards: [] });
+  // c1 指向云端的题库 d1，云端为空时无处可归，随题库存量一起丢掉
+  assert.equal(onlyLocal.cards.length, 3);
+  assert.deepEqual(onlyLocal.decks.map((d) => d.id), ['d2', 'd3', 'd9']);
+});

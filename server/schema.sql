@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS chat_members (
   user_id TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member',
   joined_at INTEGER NOT NULL,
+  last_read_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (group_id, user_id)
 );
 
