@@ -1332,6 +1332,20 @@ kbd {
   .session-foot { display: none; }
 
   .modal { padding: 0; align-items: end; }
+
+  /* 群聊 / 群设置：顶到操作栏下沿，整块固定不再漂在下面 */
+  .modal.is-tall { place-items: stretch; padding: var(--appbar-h, 52px) 0 0; }
+  .modal.is-tall .modal-panel {
+    height: 100%; max-height: none;
+    border-radius: 18px 18px 0 0;
+    animation: sheet-top-in 0.22s cubic-bezier(0.22, 0.8, 0.3, 1) both;
+  }
+  @keyframes sheet-top-in { from { opacity: 0.6; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
+  .modal.is-tall .modal-body { display: flex; flex-direction: column; overflow: hidden; }
+  .modal.is-tall .group-panel,
+  .modal.is-tall .group-settings { flex: 1; min-height: 0; }
+  .modal.is-tall .thread-list,
+  .modal.is-tall .group-settings-body { flex: 1; max-height: none; }
   .modal-panel {
     width: 100%;
     max-height: 92dvh;
@@ -1523,6 +1537,12 @@ kbd {
 .group-item-main { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
 .group-item-name { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13.5px; font-weight: 600; word-break: break-all; }
 .group-item-meta { color: var(--muted); font-size: 11px; }
+.group-unread {
+  display: flex; align-items: center; justify-content: center; flex: none;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+  background: var(--brick); color: #fff; font-size: 11px; font-weight: 600;
+  line-height: 1; font-variant-numeric: tabular-nums;
+}
 .group-tag {
   padding: 1px 6px; border-radius: 999px; background: rgba(47, 103, 83, 0.1);
   color: var(--accent); font-size: 10px; font-style: normal; font-weight: 500; white-space: nowrap;

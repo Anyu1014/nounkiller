@@ -102,7 +102,7 @@ build_ipa() {
 
 run_tests() {
   say "运行核心逻辑测试"
-  "$NODE" --test "$SRC/test/run.mjs"
+  "$NODE" --test "$SRC"/test/*.mjs
 }
 
 case "${1:-all}" in
