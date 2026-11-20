@@ -1,1 +1,25 @@
+# 构建产物与缓存
+/build/
+/.cache/
+/.wrangler/
+*.log
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/src/main/assets/www/
+android/app/*.keystore
+
+# iOS（工程与 www 由 tool/build.sh 生成）
+ios/NounKiller.xcodeproj/
+ios/NounKiller/www/
+ios/NounKiller/Info.plist
+ios/*.xcworkspace/
+*.xcuserdatad/
+
+# 本地环境
 .dev.vars
+
+.DS_Store
