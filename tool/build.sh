@@ -92,12 +92,15 @@ build_ipa() {
   rm -rf "$CACHE/NounKiller.xcarchive" "$CACHE/ios-export"
   "$XCODEBUILD" -project "$IOS/NounKiller.xcodeproj" -scheme NounKiller \
     -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+    -derivedDataPath "$SRC/.build/DerivedData" \
     -archivePath "$CACHE/NounKiller.xcarchive" -allowProvisioningUpdates archive -quiet
   say "导出 IPA"
   "$XCODEBUILD" -exportArchive -archivePath "$CACHE/NounKiller.xcarchive" \
     -exportPath "$CACHE/ios-export" -exportOptionsPlist "$SRC/tool/ExportOptions.plist" \
     -allowProvisioningUpdates -quiet
   publish "$CACHE/ios-export/NounKiller.ipa" "$IPA_NAME"
+  # 归档瘦身：dSYM 占 .xcarchive 约 80%，只留最近 3 个版本
+  /Users/y/toolchains/bin/xc-archive-slim --keep 3 "$CACHE" || true
 }
 
 run_tests() {
